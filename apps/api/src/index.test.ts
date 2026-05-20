@@ -40,9 +40,7 @@ describe('Express API Gateway', () => {
   });
 
   it('GET /api/v1/non-existent-route should return 404', async () => {
-    const res = await request(app)
-      .get('/api/v1/non-existent-route')
-      .expect(404);
+    const res = await request(app).get('/api/v1/non-existent-route').expect(404);
 
     expect(res.body).toHaveProperty('error');
     expect(res.body.code).toBe('NOT_FOUND');

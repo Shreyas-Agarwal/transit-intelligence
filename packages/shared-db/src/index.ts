@@ -46,9 +46,7 @@ export class DatabaseManager {
   public getClickHouseClient(config?: Parameters<typeof createClient>[0]): ClickHouseClient {
     if (!this.clickHouseClient) {
       const url =
-        process.env.CLICKHOUSE_URL ||
-        process.env.CLICKHOUSE_HOST ||
-        'http://localhost:8123';
+        process.env.CLICKHOUSE_URL || process.env.CLICKHOUSE_HOST || 'http://localhost:8123';
       const username = process.env.CLICKHOUSE_USER || 'default';
       const password = process.env.CLICKHOUSE_PASSWORD || '';
       const database = process.env.CLICKHOUSE_DB || 'default';

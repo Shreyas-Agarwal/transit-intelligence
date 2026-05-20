@@ -19,10 +19,10 @@ describe('Shared DB Manager', () => {
     const manager = new DatabaseManager();
     const db = manager.getDuckDb(':memory:');
     expect(db).toBeInstanceOf(Database);
-    
+
     // Test a simple query to verify it works
     await new Promise<void>((resolve, reject) => {
-      db.all("SELECT 1 + 1 as result", (err, rows) => {
+      db.all('SELECT 1 + 1 as result', (err, rows) => {
         try {
           expect(err).toBeNull();
           expect(rows).toEqual([{ result: 2 }]);
@@ -32,7 +32,7 @@ describe('Shared DB Manager', () => {
         }
       });
     });
-    
+
     await manager.closeAll();
   });
 
