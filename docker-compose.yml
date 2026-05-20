@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # Primary relational database
+  postgres:
+    image: postgres:16-alpine
+    container_name: transit-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: transit_intelligence
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # In-memory store and messaging cache
+  redis:
+    image: redis:7-alpine
+    container_name: transit-redis
+    restart: always
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Phase 2 Scalability Readiness: Redpanda (Kafka-compatible broker)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.6
+    container_name: transit-redpanda
+    restart: always
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr 0.0.0.0:8082
+      - --advertise-pandaproxy-addr localhost:8082
+    ports:
+      - '8082:8082'
+      - '9092:9092'
+      - '19092:19092'
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    profiles:
+      - phase2 # Start only when explicitly requested (e.g. docker compose --profile phase2 up)
+
+  # Phase 2 Scalability Readiness: ClickHouse Analytics Store
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: transit-clickhouse
+    restart: always
+    ports:
+      - '8123:8123'
+      - '9000:9000'
+    environment:
+      CLICKHOUSE_DB: transit_intelligence_analytics
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:8123/ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - phase2 # Start only when explicitly requested
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  redpanda-data:
+    driver: local
+  clickhouse-data:
+    driver: local
