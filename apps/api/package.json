@@ -6,12 +6,14 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc && node dist/index.js",
-    "lint": "eslint src/**/*.ts"
+    "lint": "eslint src/**/*.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@transit-intelligence/shared-types": "workspace:*",
     "@transit-intelligence/shared-logger": "workspace:*",
     "@transit-intelligence/shared-errors": "workspace:*",
+    "@transit-intelligence/shared-db": "workspace:*",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2"

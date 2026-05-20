@@ -47,7 +47,7 @@ export default function App() {
           <div className="card metric-card">
             <h3>Data Pipeline</h3>
             <p className="metric-value">Phase 1</p>
-            <span className="metric-subtext">Postgres + Redis</span>
+            <span className="metric-subtext">Postgres + DuckDB</span>
           </div>
         </section>
 
