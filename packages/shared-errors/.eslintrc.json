@@ -1,0 +1,3 @@
+{
+  "extends": "../shared-config/eslint.base.json"
+}
