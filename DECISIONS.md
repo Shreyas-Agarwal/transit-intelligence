@@ -1,0 +1,11 @@
+# Architectural Decision Log
+
+This log catalogs all major architectural decisions for the Transit Intelligence Platform. Each decision is backed by an Architecture Decision Record (ADR) in `docs/adr/`.
+
+| ID       | Title                                                                                                                                              | Date       | Status   | Summary                                                                                              |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| **0001** | [Use Monorepo Architecture](file:///D:/transit-intelligence/docs/adr/0001-use-monorepo-architecture.md)                                            | 2026-05-20 | Approved | Adopt pnpm workspaces and Turborepo for dependency management and orchestrating apps/packages.       |
+| **0002** | [Adopt TypeScript Across Stack](file:///D:/transit-intelligence/docs/adr/0002-adopt-typescript-across-stack.md)                                    | 2026-05-20 | Approved | Standardize on TypeScript to enforce type safety, shared models, and auto-generated API clients.     |
+| **0003** | [Event Driven Architecture & Phase 2 Transition](file:///D:/transit-intelligence/docs/adr/0003-event-driven-architecture-and-phase2-transition.md) | 2026-05-20 | Approved | Start with Redis Streams, migrating to Kafka (Redpanda) for streaming telemetry in Phase 2.          |
+| **0004** | [Database Strategy: PostgreSQL & ClickHouse](file:///D:/transit-intelligence/docs/adr/0004-database-strategy-postgres-and-clickhouse.md)           | 2026-05-20 | Approved | PostgreSQL for transactional relations, ClickHouse for high-throughput analytical time-series logs.  |
+| **0005** | [AI-Assisted Development Governance](file:///D:/transit-intelligence/docs/adr/0005-ai-assisted-development-governance.md)                          | 2026-05-20 | Approved | Enforce type compliance, mandatory linting, test validation, and human review for all agent commits. |
