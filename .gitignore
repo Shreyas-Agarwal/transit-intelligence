@@ -61,3 +61,18 @@ coverage/
 .nyc_output/
 playwright-report/
 test-results/
+
+# Python virtual environments, compiled bytecode, and caches
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.tox/
+*.db
+
