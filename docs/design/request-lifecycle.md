@@ -2,33 +2,35 @@
 
 This document traces the data lifecycle of the two primary system operations:
 
-1. Vehicle Telemetry Ingestion (High throughput, time-series)
-2. Live Vehicle Location Retrieval (Low latency, read)
+1. Swiss GTFS-RT Ingestion Lifecycle (30s Polling & Protobuf parsing)
+2. Live Vehicle Location & Routing Pathfinding Retrieval (Dynamic Graph computation)
 
-## 1. Vehicle Telemetry Ingestion Lifecycle
+## 1. Swiss GTFS-RT Ingestion Lifecycle
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Vehicle as IoT/Vehicle Tracker
-    participant Gateway as API Gateway (NGINX)
-    participant Worker as Telemetry Worker
-    participant Broker as Message Broker (Redis/Kafka)
-    participant AnalyticalDB as Analytical DB (ClickHouse)
+    participant Feed as Open Data Swiss (HTTP Feed)
+    participant Worker as Ingestion Worker
+    participant DB as PostgreSQL (Relational metadata)
+    participant Duck as DuckDB (Temporal dynamic graph)
 
-    Vehicle->>Gateway: POST /api/v1/telemetry (GPS data)
-    Gateway->>Worker: Route request
-    Worker->>Worker: Validate message using shared Zod schema
-    Worker->>Broker: Publish RAW_TELEMETRY event
-    Worker->>Gateway: Return 202 Accepted (Non-blocking)
-    Gateway->>Vehicle: HTTP 202 Accepted
+    Note over Worker: Ingestion trigger: Cron tick every 30 seconds
+    Worker->>Feed: HTTP GET /gtfs-rt/zurich (Fetch Protobuf feed)
+    Feed-->>Worker: Return binary Protobuf payload
+    Worker->>Worker: Parse Protobuf using standard GTFS-RT schemas
 
-    Note over Broker, AnalyticalDB: Asynchronous processing
-    Worker->>Broker: Consume RAW_TELEMETRY (Batch buffer)
-    Worker->>AnalyticalDB: Insert telemetry batch (ClickHouse)
+    par Ingestion to Postgres (Transactional & Static metadata)
+        Worker->>DB: Log trip delays & active route schedule changes
+        DB-->>Worker: Acknowledge writes
+    and Ingestion to DuckDB (Dynamic routing weights)
+        Worker->>Duck: Append vehicle positions & calculate travel times
+        Worker->>Duck: Recalculate dynamic edge weights on temporal graph
+        Duck-->>Worker: Acknowledge updates
+    end
 ```
 
-## 2. Live Vehicle Location Query Lifecycle
+## 2. Live Routing Pathfinding & Location Query Lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -36,19 +38,19 @@ sequenceDiagram
     participant Portal as Management Web App
     participant Gateway as API Gateway (NGINX)
     participant API as Core API
-    participant Cache as Redis Cache
-    participant DB as PostgreSQL (Metadata)
+    participant Duck as DuckDB (Embedded Engine)
+    participant DB as PostgreSQL (Static Schedules)
 
-    Portal->>Gateway: GET /api/v1/vehicles/active
+    Portal->>Gateway: GET /api/v1/routing/calculate?from=X&to=Y&time=T
     Gateway->>API: Route request
-    API->>Cache: Query active vehicle locations (from Redis Cache)
-    alt Cache Hit
-        Cache-->>API: Return coordinates JSON
-    else Cache Miss
-        API->>DB: Query last known states (fallback)
-        DB-->>API: Return states
-        API->>Cache: Populate cache (TTL: 10s)
-    end
-    API-->>Gateway: HTTP 200 OK (Coordinates JSON)
-    Gateway-->>Portal: Render vehicle markers on Map
+
+    API->>Duck: Query path optimization matching time-dependent weights
+    Note over Duck, DB: DuckDB uses postgres_scanner to scan static PG tables
+    Duck->>DB: Join static GTFS schedules (routes, stop_times)
+    DB-->>Duck: Return schedule tables
+    Duck->>Duck: Execute dynamic Dijkstra/A* path calculation on temporal graph
+    Duck-->>API: Return optimized path segments with dynamic delays
+
+    API-->>Gateway: HTTP 200 OK (Route JSON)
+    Gateway-->>Portal: Render optimal routes on Operator Map
 ```

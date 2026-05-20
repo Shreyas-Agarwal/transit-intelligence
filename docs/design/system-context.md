@@ -34,13 +34,22 @@ The transactional state controller.
   - Route planning, static schedule assignments, and vehicle inventory management.
   - CRUD operations over alerts and configurations.
 
-### 4. Telemetry Processor (`apps/workers`)
+### 4. Swiss GTFS-RT Ingestion Worker (`apps/workers`)
 
-High-throughput ingestion worker handling incoming GPS telemetry.
+High-throughput polling worker retrieving live transit feeds.
 
-- **Tech stack:** Node.js (or Python for analytical pipelines).
+- **Tech stack:** Node.js + TypeScript + `protobufjs`.
 - **Responsibilities:**
-  - Decode IoT telemetry coordinates (coordinates, timestamps, speed).
-  - Validate package schema (Zod schema checking).
-  - Stream events to Redis (Phase 1) and Kafka (Phase 2).
-  - Bulk write coordinate logs to ClickHouse (Phase 2).
+  - Poll the Swiss Open Data HTTP feeds for GTFS-RT updates every 30 seconds.
+  - Parse binary protobuf payloads to structured JSON records.
+  - Push parsed positions, trip delays, and schedule adjustments to the Redis cache stream and analytical store.
+
+### 5. Graph Analytics Engine (Embedded)
+
+Calculates optimal routes and delays using temporally variable weighted graph theory.
+
+- **Tech stack:** Node.js + DuckDB (embedded file-backed column store).
+- **Responsibilities:**
+  - Query static timetables from PostgreSQL and join them with dynamic delay variables in DuckDB.
+  - Reconstruct the transit network as a weighted graph, where edge weights dynamically represent travel times as a function of the time of day, congestion metrics, and active vehicle delays.
+  - Expose fast relational SQL interfaces to the Core API for operational pathfinding queries.
