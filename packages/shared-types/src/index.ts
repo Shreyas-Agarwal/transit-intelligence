@@ -33,3 +33,38 @@ export interface Alert {
   timestamp: string;
   resolved: boolean;
 }
+
+// Transit Network Observability Types
+export interface Stop {
+  stopId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+}
+
+export interface StopTime {
+  tripId: string;
+  stopId: string;
+  arrivalTime: string; // HH:MM:SS
+  departureTime: string; // HH:MM:SS
+  stopSequence: number;
+}
+
+export interface DelayUpdateEvent {
+  vehicleId: string;
+  tripId: string;
+  latitude: number;
+  longitude: number;
+  recordedAt: string;
+  delaySeconds: number;
+}
+
+export interface EdgeWeight {
+  sourceStopId: string;
+  targetStopId: string;
+  tripId: string;
+  scheduledDurationSeconds: number;
+  liveDelaySeconds: number;
+  weightSeconds: number;
+  lastUpdated: string;
+}
