@@ -1,4 +1,4 @@
-Transit Intelligence Platform — Roadmap
+# Transit Intelligence Platform — Roadmap
 
 This directory contains the long-term architectural roadmap, sprint structure, and phased evolution strategy for the Transit Intelligence Platform.
 
@@ -10,7 +10,7 @@ It is being developed as a long-term computational observability system for stud
 
 ---
 
-Core Development Philosophy
+## Core Development Philosophy
 
 The platform prioritizes:
 
@@ -28,7 +28,7 @@ The objective is to progressively construct a replayable operational observatory
 
 ---
 
-Architectural Evolution Strategy
+## Architectural Evolution Strategy
 
 The roadmap is intentionally layered.
 
@@ -47,9 +47,10 @@ This sequencing is intentional and exists to prevent premature abstraction infla
 
 ---
 
-Phase Overview
+## Phase Overview
 
 Phase| Focus
+------- | -------
 Phase 1| Zürich Operational Observatory
 Phase 1.5| Zürich Canton Multimodal Expansion
 Phase 2| Switzerland Multimodal Observability
@@ -60,15 +61,15 @@ Phase 5| Research & Simulation Layer
 
 ---
 
-Phase 1 — Zürich Operational Observatory
+## Phase 1 — Zürich Operational Observatory
 
-Objective
+**Objective**
 
 Establish a replayable operational observability platform for Zürich Zone 110 using GTFS and GTFS-RT transit feeds.
 
 This phase forms the architectural foundation of the entire platform.
 
-Core Deliverables
+**Core Deliverables**
 
 - Temporal transit graph foundations
 - GTFS static ingestion
@@ -84,7 +85,7 @@ Core Deliverables
 - Spatial-temporal vehicle mapping
 - Operational replay interface
 
-Architectural Focus
+**Architectural Focus**
 
 This phase focuses entirely on:
 
@@ -96,7 +97,7 @@ This phase focuses entirely on:
 
 The platform remains vehicle-network-centric during this phase.
 
-Explicit Non-Goals
+**Explicit Non-Goals**
 
 Phase 1 intentionally excludes:
 
@@ -114,15 +115,15 @@ The purpose of Phase 1 is to establish a stable and operationally coherent obser
 
 ---
 
-Phase 1.5 — Zürich Canton Multimodal Expansion
+## Phase 1.5 — Zürich Canton Multimodal Expansion
 
-Objective
+**Objective**
 
 Expand the observability platform beyond Zürich Zone 110 into the broader Zürich canton transit ecosystem while introducing water-based transit systems into the temporal graph model.
 
 This phase acts as a controlled multimodal expansion layer before scaling to the entirety of Switzerland.
 
-Why This Phase Exists
+**Why This Phase Exists**
 
 Water-based transit systems introduce a fundamentally different class of operational behavior compared to dense urban land transit systems.
 
@@ -137,7 +138,7 @@ Adding ferries and lake crossings introduces:
 
 This creates new temporal graph semantics not present in purely tram/bus/rail systems.
 
-Core Deliverables
+**Core Deliverables**
 
 - Zürich canton transit expansion
 - Ferry and water-route integration
@@ -147,7 +148,7 @@ Core Deliverables
 - Expanded propagation modeling
 - Regional observability scaling
 
-Architectural Focus
+**Architectural Focus**
 
 This phase validates:
 
@@ -160,13 +161,13 @@ The goal is to validate multimodal operational observability before national-sca
 
 ---
 
-Phase 2 — Switzerland Multimodal Observability
+## Phase 2 — Switzerland Multimodal Observability
 
-Objective
+**Objective**
 
 Expand the platform into a national-scale operational observability system covering the broader Swiss transit ecosystem.
 
-Core Expansion Areas
+**Core Expansion Areas**
 
 - National rail
 - Regional rail
@@ -176,7 +177,7 @@ Core Expansion Areas
 - Mountain rail systems
 - Long-range multimodal transfers
 
-Architectural Focus
+**Architectural Focus**
 
 This phase validates:
 
@@ -190,9 +191,9 @@ The system remains primarily vehicle-network-centric during this phase.
 
 ---
 
-Phase 2.5 — Passenger Pressure & Demand Dynamics
+## Phase 2.5 — Passenger Pressure & Demand Dynamics
 
-Objective
+**Objective**
 
 Introduce inferred passenger-generated pressure dynamics into the operational transit network.
 
@@ -205,7 +206,7 @@ Rather than simulating individual humans directly, this phase models:
 - recovery elasticity
 - probabilistic passenger flow fields
 
-Architectural Significance
+**Architectural Significance**
 
 This phase transitions the platform from:
 
@@ -215,7 +216,7 @@ This phase transitions the platform from:
 
 This is expected to be one of the most conceptually challenging phases of the platform.
 
-Core Focus Areas
+**Core Focus Areas**
 
 - Congestion field estimation
 - Transfer overload dynamics
@@ -226,9 +227,9 @@ Core Focus Areas
 
 ---
 
-Phase 3 — External Perturbation Systems
+## Phase 3 — External Perturbation Systems
 
-Objective
+**Objective**
 
 Integrate external mobility and disruption systems capable of injecting pressure into the transit network.
 
@@ -240,7 +241,7 @@ Potential Systems
 - Public event surges
 - Regional mobility shocks
 
-Architectural Focus
+**Architectural Focus**
 
 External systems are treated as:
 
@@ -254,9 +255,9 @@ This phase expands the observatory into a broader multimodal mobility intelligen
 
 ---
 
-Phase 4 — Cross-City Validation
+## Phase 4 — Cross-City Validation
 
-Objective
+**Objective**
 
 Validate the platform’s architectural portability across different global transit ecosystems.
 
@@ -267,7 +268,7 @@ Candidate Validation Environments
 - Tokyo
 - Other dense multimodal cities
 
-Validation Goals
+**Validation Goals**
 
 - topology independence
 - operational semantic flexibility
@@ -279,13 +280,13 @@ The purpose of this phase is not geographic expansion alone, but comparative sys
 
 ---
 
-Phase 5 — Research & Simulation Layer
+## Phase 5 — Research & Simulation Layer
 
-Objective
+**Objective**
 
 Leverage the operational observability platform to investigate broader systems research questions and emergent transit network behavior.
 
-Potential Research Areas
+**Potential Research Areas**
 
 - Cascading failure analysis
 - Network fragility scoring
@@ -302,7 +303,7 @@ Prediction and simulation are treated as derived intelligence layers built on to
 
 ---
 
-Sprint Structure & Governance
+## Sprint Structure & Governance
 
 Development operates on a biweekly sprint cadence.
 
@@ -323,7 +324,7 @@ Each sprint directory contains:
 
 ---
 
-Sprint Retrospective Philosophy
+## Sprint Retrospective Philosophy
 
 Every sprint concludes with a lightweight retrospective documenting:
 
@@ -337,8 +338,9 @@ The purpose is preserving architectural continuity and reducing conceptual drift
 
 ---
 
-Documentation Structure
+## Documentation Structure
 
+'''text
 docs/
 └── roadmap/
      ├── README.md
@@ -349,6 +351,7 @@ docs/
      ├── phase-3/
      ├── phase-4/
      └── phase-5/
+'''
 
 Each phase folder contains:
 
@@ -360,7 +363,7 @@ Each phase folder contains:
 
 ---
 
-Current Active Development Focus
+## Current Active Development Focus
 
 Current active development is focused exclusively on:
 
