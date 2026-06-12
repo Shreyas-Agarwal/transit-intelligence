@@ -14,7 +14,7 @@ graph TD
     GTFSFeed([Open Data Swiss / GTFS-RT Zurich]) -->|Protobuf Poll 30s| IngestionWorker[GTFS Ingestion Worker]
     IoT([Vehicle GPS / IoT Transmitters]) -->|TCP / Ingestion Protocol| Gateway
 
-    Gateway -->|Forward Client| API[Core API Service / Express]
+    Gateway -->|Forward Client| API[Core API Service / Fastify]
     Gateway -->|Forward Telemetry| API
 
     API -->|Write/Read Transactional| DB[(PostgreSQL Primary)]
