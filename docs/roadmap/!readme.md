@@ -49,15 +49,15 @@ This sequencing is intentional and exists to prevent premature abstraction infla
 
 ## Phase Overview
 
-Phase| Focus
-------- | -------
-Phase 1| Zürich Operational Observatory
-Phase 1.5| Zürich Canton Multimodal Expansion
-Phase 2| Switzerland Multimodal Observability
-Phase 2.5| Passenger Pressure & Demand Dynamics
-Phase 3| External Perturbation Systems
-Phase 4| Cross-City Validation
-Phase 5| Research & Simulation Layer
+| Phase     | Focus                                |
+| --------- | ------------------------------------ |
+| Phase 1   | Zürich Operational Observatory       |
+| Phase 1.5 | Zürich Canton Multimodal Expansion   |
+| Phase 2   | Switzerland Multimodal Observability |
+| Phase 2.5 | Passenger Pressure & Demand Dynamics |
+| Phase 3   | External Perturbation Systems        |
+| Phase 4   | Cross-City Validation                |
+| Phase 5   | Research & Simulation Layer          |
 
 ---
 
@@ -343,14 +343,14 @@ The purpose is preserving architectural continuity and reducing conceptual drift
 '''text
 docs/
 └── roadmap/
-     ├── README.md
-     ├── phase-1/
-     ├── phase-1.5/
-     ├── phase-2/
-     ├── phase-2.5/
-     ├── phase-3/
-     ├── phase-4/
-     └── phase-5/
+├── README.md
+├── phase-1/
+├── phase-1.5/
+├── phase-2/
+├── phase-2.5/
+├── phase-3/
+├── phase-4/
+└── phase-5/
 '''
 
 Each phase folder contains:

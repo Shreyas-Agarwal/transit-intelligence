@@ -17,13 +17,16 @@
 ## Retrospective Analysis & Takeaways
 
 ### What Went Well
+
 - Standalone Fastify provides a much cleaner boundary structure than Express, matching our modular monolith design without introducing reflection-heavy frameworks like NestJS.
 - Accelerating Redpanda directly to Phase 1 allows us to start with the correct immutable snapshot replay substrate immediately, preventing the need to write and throw away Redis Streams ingestion code.
 - Consolidating core governance and visual maps at the start ensures that future Phase 1 development flows cleanly and conforms to strict architectural boundaries.
 
 ### Architectural Decisions Consolidated
+
 - Standalone Fastify was selected specifically for runtime transparency and low abstraction depth, prioritizing personal systems-level understanding and debugging visibility.
 - Decoupling ingestion (workers) from calculations (DuckDB/Python) via Redpanda simplifies our temporal logic and guarantees deterministic replayability from the start.
 
 ### Intentional Deferred Scope
+
 - Clicking and warehousing historical telemetry into ClickHouse remains deferred until Phase 2, as local file-backed DuckDB processing provides sufficient analytics speed for Zürich Zone 110.
