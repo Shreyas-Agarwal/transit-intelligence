@@ -42,8 +42,8 @@ An implementation is considered complete if and only if:
 
 AI agents must consult the following documents before implementing significant changes:
 
-- docs/adr/*
-- docs/design/*
-- docs/ai/skills/*
-- docs/ai/harnesses/*
-- docs/ai/context/*
+- docs/adr/\*
+- docs/design/\*
+- docs/ai/skills/\*
+- docs/ai/harnesses/\*
+- docs/ai/context/\*

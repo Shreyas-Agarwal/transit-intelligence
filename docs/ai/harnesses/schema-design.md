@@ -10,12 +10,12 @@ Before creating a schema:
 
 Prefer:
 
-* Explicit keys
-* Immutable events
-* Clear ownership
+- Explicit keys
+- Immutable events
+- Clear ownership
 
 Avoid:
 
-* Catch-all tables
-* Generic JSON blobs
-* Hidden temporal semantics
+- Catch-all tables
+- Generic JSON blobs
+- Hidden temporal semantics

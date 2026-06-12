@@ -14,7 +14,7 @@ Implementation must stop until these questions are answered.
 
 After implementation verify:
 
-* Build passes
-* Tests pass
-* Documentation updated
-* Contracts unchanged or versioned
+- Build passes
+- Tests pass
+- Documentation updated
+- Contracts unchanged or versioned

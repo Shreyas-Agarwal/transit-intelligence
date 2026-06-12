@@ -12,19 +12,19 @@ Internal models may differ.
 
 Provides:
 
-* Stops
-* Routes
-* Trips
-* Stop times
-* Calendars
+- Stops
+- Routes
+- Trips
+- Stop times
+- Calendars
 
 ## GTFS Realtime
 
 Provides:
 
-* Vehicle positions
-* Trip updates
-* Service alerts
+- Vehicle positions
+- Trip updates
+- Service alerts
 
 ## Design Rules
 

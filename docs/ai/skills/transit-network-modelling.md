@@ -8,10 +8,10 @@ Schedules, vehicles, and realtime updates are observations of activity occurring
 
 The graph itself exists independently of:
 
-* Vehicles
-* Timetables
-* GTFS feeds
-* Realtime events
+- Vehicles
+- Timetables
+- GTFS feeds
+- Realtime events
 
 ## Graph Components
 
@@ -21,10 +21,10 @@ Nodes represent physical passenger interaction points.
 
 Examples:
 
-* Stop
-* Platform
-* Station
-* Transit hub
+- Stop
+- Platform
+- Station
+- Transit hub
 
 ### Edges
 
@@ -32,10 +32,10 @@ Edges represent movement possibilities.
 
 Examples:
 
-* Track segment
-* Road segment
-* Walking transfer
-* Platform transfer
+- Track segment
+- Road segment
+- Walking transfer
+- Platform transfer
 
 ## Important Distinction
 
@@ -43,11 +43,11 @@ Do not model the network primarily as relational tables.
 
 Think first in:
 
-* Nodes
-* Edges
-* Connectivity
-* Reachability
-* Traversal
+- Nodes
+- Edges
+- Connectivity
+- Reachability
+- Traversal
 
 Database tables are storage representations of graph concepts.
 
@@ -63,9 +63,9 @@ The graph remains valid even if every vehicle disappears.
 
 Avoid:
 
-* Treating routes as edges
-* Treating schedules as topology
-* Treating GTFS as the source of truth for network structure
-* Embedding temporal state into graph definitions
+- Treating routes as edges
+- Treating schedules as topology
+- Treating GTFS as the source of truth for network structure
+- Embedding temporal state into graph definitions
 
 Topology and operations are separate concerns.

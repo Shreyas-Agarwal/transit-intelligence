@@ -8,10 +8,10 @@ Do not immediately solve problems using joins and aggregations.
 
 Ask:
 
-* What are the nodes?
-* What are the edges?
-* What is the path?
-* What is reachable?
+- What are the nodes?
+- What are the edges?
+- What is the path?
+- What is reachable?
 
 ## Common Queries
 
@@ -35,10 +35,10 @@ What becomes accessible from A?
 
 Potential graph algorithms include:
 
-* Dijkstra
-* A*
-* K-shortest paths
-* Transfer graph traversal
-* Accessibility analysis
+- Dijkstra
+- A\*
+- K-shortest paths
+- Transfer graph traversal
+- Accessibility analysis
 
 Design data models so these remain possible.

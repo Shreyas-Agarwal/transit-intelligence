@@ -10,10 +10,10 @@ Questions are rarely:
 
 Questions are usually:
 
-* What was the state at time T?
-* What changed between T1 and T2?
-* What did we know at T?
-* When did this become true?
+- What was the state at time T?
+- What changed between T1 and T2?
+- What did we know at T?
+- When did this become true?
 
 ## Time Types
 

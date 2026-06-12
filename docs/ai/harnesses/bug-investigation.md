@@ -14,7 +14,7 @@ Never patch symptoms without identifying the root cause.
 
 Always document:
 
-* Trigger
-* Impact
-* Root cause
-* Resolution
+- Trigger
+- Impact
+- Root cause
+- Resolution

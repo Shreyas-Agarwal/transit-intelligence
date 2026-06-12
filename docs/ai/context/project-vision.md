@@ -4,11 +4,11 @@ Transit Intelligence aims to build a modern platform for understanding transit n
 
 The platform focuses on:
 
-* Transit topology
-* Realtime operations
-* Historical reconstruction
-* Event-driven processing
-* Graph-based analysis
+- Transit topology
+- Realtime operations
+- Historical reconstruction
+- Event-driven processing
+- Graph-based analysis
 
 The objective is not merely to display GTFS data.
 

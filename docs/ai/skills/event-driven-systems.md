@@ -16,10 +16,10 @@ Producer → Stream → Consumer → Materialized State
 
 Redpanda acts as:
 
-* Immutable event ledger
-* Replay source
-* Recovery source
-* Inter-service transport
+- Immutable event ledger
+- Replay source
+- Recovery source
+- Inter-service transport
 
 It is not a cache.
 
@@ -29,12 +29,12 @@ It is not a database replacement.
 
 Prefer:
 
-* Append-only events
-* Idempotent consumers
-* Replayable processing
+- Append-only events
+- Idempotent consumers
+- Replayable processing
 
 Avoid:
 
-* Mutable event history
-* Consumer-specific event formats
-* Tight producer-consumer coupling
+- Mutable event history
+- Consumer-specific event formats
+- Tight producer-consumer coupling
