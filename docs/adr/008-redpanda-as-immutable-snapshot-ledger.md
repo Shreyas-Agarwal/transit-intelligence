@@ -59,19 +59,15 @@ Phase 1 will intentionally maintain a minimal topic topology to avoid premature 
 Initial topics include:
 
 - "transit.snapshots.raw"
-  
   - Raw normalized GTFS-RT snapshot payloads.
 
 - "transit.snapshots.normalized"
-  
   - Cleaned and structurally validated operational state snapshots.
 
 - "transit.state.deltas"
-  
   - Computed state transitions derived between consecutive snapshots.
 
 - "transit.metrics.operational"
-  
   - Derived observability and resilience metrics.
 
 Additional domain-specific topics will not be introduced until justified by clear computational requirements.

@@ -1,15 +1,14 @@
-import express from 'express';
-import cors from 'cors';
+import Fastify from 'fastify';
+import cors from '@fastify/cors';
 import { Logger } from '@transit-intelligence/shared-logger';
 import { NotFoundError, BaseError } from '@transit-intelligence/shared-errors';
 import { Vehicle } from '@transit-intelligence/shared-types';
 
-const app = express();
+const app = Fastify({ logger: false });
 const port = process.env.PORT || 3000;
 const logger = new Logger('API-Service');
 
-app.use(cors());
-app.use(express.json());
+app.register(cors);
 
 import path from 'path';
 import fs from 'fs';
@@ -45,102 +44,95 @@ const mockVehicles: Vehicle[] = [
   { id: 'v2', licensePlate: 'TX-5678', status: 'ACTIVE', capacity: 55, agencyId: 'agency-1' },
 ];
 
-app.get('/api/v1/vehicles/active', (req, res) => {
+app.get('/api/v1/vehicles/active', async (_request, _reply) => {
   logger.info('Fetching active vehicles list', { requestId: 'req-' + Date.now() });
-  res.json(mockVehicles);
+  return mockVehicles;
 });
 
 // Dynamic Route pathfinding weight calculator (queries temporal graph edge weights)
-app.get('/api/v1/routing/calculate', async (req, res, next) => {
-  const { from, to } = req.query;
+app.get('/api/v1/routing/calculate', async (request, _reply) => {
+  const { from, to } = request.query as { from?: string; to?: string };
   logger.info(`Calculating dynamic routing from ${from} to ${to}`);
 
-  try {
-    // Check if edge_weights table exists in DuckDB
-    const tables = await queryDuckDb<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='edge_weights'",
-    );
+  // Check if edge_weights table exists in DuckDB
+  const tables = await queryDuckDb<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='edge_weights'",
+  );
 
-    if (tables.length === 0) {
-      // Fallback if worker hasn't run yet
-      return res.json({
-        route: [from, to],
-        totalDurationSeconds: 180,
-        liveDelaySeconds: 0,
-        status: 'MOCK_FALLBACK',
-        message: 'DuckDB tables not yet populated by workers. Showing fallback weights.',
-      });
-    }
-
-    const weights = await queryDuckDb<EdgeWeight>(
-      'SELECT * FROM edge_weights WHERE source_stop_id = ? AND target_stop_id = ?',
-      [from, to],
-    );
-
-    res.json({
-      from,
-      to,
-      weights,
-      status: 'LIVE_ANALYTICS',
-    });
-  } catch (error) {
-    next(error);
+  if (tables.length === 0) {
+    // Fallback if worker hasn't run yet
+    return {
+      route: [from, to],
+      totalDurationSeconds: 180,
+      liveDelaySeconds: 0,
+      status: 'MOCK_FALLBACK',
+      message: 'DuckDB tables not yet populated by workers. Showing fallback weights.',
+    };
   }
+
+  const weights = await queryDuckDb<EdgeWeight>(
+    'SELECT * FROM edge_weights WHERE source_stop_id = ? AND target_stop_id = ?',
+    [from, to],
+  );
+
+  return {
+    from,
+    to,
+    weights,
+    status: 'LIVE_ANALYTICS',
+  };
 });
 
 // Network congestion and delay hotspots analytics endpoint
-app.get('/api/v1/network/health', async (req, res, next) => {
+app.get('/api/v1/network/health', async (_request, _reply) => {
   logger.info('Fetching network congestion profiles');
 
-  try {
-    const tables = await queryDuckDb<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='vehicle_positions'",
-    );
+  const tables = await queryDuckDb<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='vehicle_positions'",
+  );
 
-    if (tables.length === 0) {
-      return res.json({
-        hotspots: [],
-        status: 'MOCK_FALLBACK',
-        message: 'No live telemetry updates recorded yet.',
-      });
-    }
-
-    const hotspots = await queryDuckDb<{ trip_id: string; avg_delay: number; pings_count: number }>(
-      `SELECT 
-         trip_id, 
-         AVG(delay_seconds) as avg_delay, 
-         COUNT(*) as pings_count 
-       FROM vehicle_positions 
-       GROUP BY trip_id 
-       ORDER BY avg_delay DESC`,
-    );
-
-    res.json({
-      hotspots,
-      status: 'LIVE_ANALYTICS',
-    });
-  } catch (error) {
-    next(error);
+  if (tables.length === 0) {
+    return {
+      hotspots: [],
+      status: 'MOCK_FALLBACK',
+      message: 'No live telemetry updates recorded yet.',
+    };
   }
+
+  const hotspots = await queryDuckDb<{ trip_id: string; avg_delay: number; pings_count: number }>(
+    `SELECT 
+       trip_id, 
+       AVG(delay_seconds) as avg_delay, 
+       COUNT(*) as pings_count 
+     FROM vehicle_positions 
+     GROUP BY trip_id 
+     ORDER BY avg_delay DESC`,
+  );
+
+  return {
+    hotspots,
+    status: 'LIVE_ANALYTICS',
+  };
 });
 
-// Error handling middleware fallback
-app.use((req, res, next) => {
-  next(new NotFoundError(`Route ${req.method} ${req.path} not found`));
+// Error handling middleware fallback (404)
+app.setNotFoundHandler((request, _reply) => {
+  const pathPart = request.url.split('?')[0];
+  throw new NotFoundError(`Route ${request.method} ${pathPart} not found`);
 });
 
 // Global error handler
-app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  if (err instanceof BaseError) {
-    logger.warn(err.message, { statusCode: err.statusCode, errorCode: err.errorCode });
-    res.status(err.statusCode).json({
-      error: err.message,
-      code: err.errorCode,
-      details: err.details,
+app.setErrorHandler((error, request, reply) => {
+  if (error instanceof BaseError) {
+    logger.warn(error.message, { statusCode: error.statusCode, errorCode: error.errorCode });
+    reply.status(error.statusCode).send({
+      error: error.message,
+      code: error.errorCode,
+      details: error.details,
     });
   } else {
-    logger.error('Unhandled internal server error', err);
-    res.status(500).json({
+    logger.error('Unhandled internal server error', error);
+    reply.status(500).send({
       error: 'An internal server error occurred',
       code: 'INTERNAL_ERROR',
     });
@@ -148,8 +140,12 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
 });
 
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(port, () => {
-    logger.info(`Express API gateway listening at http://localhost:${port}`);
+  app.listen({ port: Number(port), host: '0.0.0.0' }, (err, address) => {
+    if (err) {
+      logger.error('Failed to start Fastify server', err);
+      process.exit(1);
+    }
+    logger.info(`Fastify API gateway listening at ${address}`);
   });
 }
 

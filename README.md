@@ -292,7 +292,7 @@ Future phases remain intentionally decoupled until the operational observability
 transit-intelligence/
 ├── apps/
 │   ├── web/          # React/TypeScript/Vite Frontend Portal
-│   ├── api/          # Express/TypeScript Core REST API
+│   ├── api/          # Fastify/TypeScript Core REST API
 │   ├── workers/      # Ingestion, processing, and polling workers
 │   ├── gateway/      # API Gateway (NGINX proxy initially)
 │   └── cli/          # Command-Line administrative tooling

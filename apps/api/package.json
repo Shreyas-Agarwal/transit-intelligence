@@ -10,17 +10,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@transit-intelligence/shared-types": "workspace:*",
-    "@transit-intelligence/shared-logger": "workspace:*",
-    "@transit-intelligence/shared-errors": "workspace:*",
+    "@fastify/cors": "^11.2.0",
     "@transit-intelligence/shared-db": "workspace:*",
-    "cors": "^2.8.5",
+    "@transit-intelligence/shared-errors": "workspace:*",
+    "@transit-intelligence/shared-logger": "workspace:*",
+    "@transit-intelligence/shared-types": "workspace:*",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "fastify": "^5.8.5"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
     "@types/node": "^20.11.24",
     "typescript": "^5.3.3"
   }
