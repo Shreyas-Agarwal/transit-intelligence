@@ -133,6 +133,159 @@ The architecture is intentionally domain-generalizable. The same event-driven op
 
 ---
 
+## Platform Evolution Roadmap
+
+The platform is intentionally being developed in carefully staged layers. The goal is not to prematurely build a perfect simulator, but to progressively construct a computational observatory capable of analyzing increasingly complex operational behaviors.
+
+Each phase introduces one fundamentally new class of complexity while preserving stable architectural foundations from earlier stages.
+
+### Phase 1 — Zürich Operational Observatory
+
+**Target Scope:** Foundational observability platform
+
+The first phase focuses entirely on operational observability of Zürich Zone 110 using live GTFS and GTFS-RT data.
+
+Core objectives:
+
+- Build the temporal transit graph engine
+- Ingest and normalize GTFS-RT snapshots
+- Derive operational state from immutable event streams
+- Visualize delay propagation and network instability
+- Support replayable historical reconstruction
+- Compute foundational reliability and resilience metrics
+
+This phase intentionally avoids:
+
+- passenger simulation
+- predictive AI/ML systems
+- behavioral modeling
+- optimization engines
+- external perturbation systems
+
+The goal of Phase 1 is to establish a stable, replayable, operationally coherent observability foundation.
+
+### Phase 2 — Switzerland Multimodal Expansion
+
+**Target Scope:** National-scale transit observability
+
+Phase 2 expands the system beyond Zürich into the broader Swiss transit network, including:
+
+- intercity rail
+- regional rail
+- trams
+- buses
+- ferry and boat routes
+- multimodal transfer coordination
+
+The purpose of this phase is to validate:
+
+- abstraction scalability
+- multimodal temporal graph semantics
+- large-scale operational propagation behavior
+- regional synchronization effects
+
+At this stage, the system remains primarily vehicle-network-centric.
+
+### Phase 2.5 — Passenger Pressure & Demand Dynamics
+
+**Target Scope:** Human-generated operational pressure modeling
+
+This phase introduces inferred passenger pressure dynamics into the existing operational network.
+
+Rather than simulating individual humans directly, the platform models:
+
+- transfer pressure
+- congestion accumulation
+- station saturation
+- redistribution pressure
+- recovery elasticity
+- probabilistic passenger flow fields
+
+This layer transforms the platform from pure operational tracking into a broader socio-operational observability system.
+
+### Phase 3 — External Perturbation Systems
+
+**Target Scope:** Airports and external mobility pressure injection
+
+Once passenger pressure modeling exists, the platform expands to incorporate external mobility systems such as:
+
+- airports
+- flight arrival/departure schedules
+- large public events
+- weather-driven disruptions
+
+Airports are treated as high-impact external pressure injectors capable of influencing downstream transit congestion, synchronization stability, and network recovery behavior.
+
+This phase evolves the system into a broader multimodal mobility observatory.
+
+### Phase 4 — Cross-City Validation
+
+**Target Scope:** Generalized operational observability validation
+
+The platform architecture is intentionally designed to be transferable across cities and transit systems.
+
+Potential future validation environments include:
+
+- New York City
+- London
+- Tokyo
+- other dense multimodal transit ecosystems
+
+The objective is not simply geographic expansion, but validation of:
+
+- architectural portability
+- topology independence
+- resilience metric robustness
+- propagation model generalizability
+- operational semantic flexibility
+
+### Phase 5 — Research & Simulation Layer
+
+**Target Scope:** Computational systems research and simulation
+
+Only after stable observability exists does the platform evolve toward formal systems research.
+
+Potential future research directions include:
+
+- cascading failure analysis
+- network fragility scoring
+- resilience quantification
+- recovery optimization
+- propagation amplification analysis
+- Monte Carlo disruption simulation
+- comparative transit ecology analysis
+
+Prediction and simulation are treated as derived intelligence layers built on top of reliable operational observability rather than as the platform’s initial purpose.
+
+Development Philosophy
+
+This project intentionally prioritizes:
+
+- operational correctness over premature AI
+- replayability over raw streaming speed
+- observability over prediction
+- modular evolution over uncontrolled scope growth
+- architectural clarity over microservice proliferation
+
+The platform is designed as a long-term computational observatory rather than a rapid prototype or short-lived demo application.
+
+Current Development Focus
+
+Current active development is focused exclusively on:
+
+- Phase 1 infrastructure
+- temporal graph foundations
+- GTFS/GTFS-RT ingestion
+- snapshot-diff state derivation
+- replayability
+- operational observability
+- delay propagation modeling
+- resilience metric foundations
+
+Future phases remain intentionally decoupled until the operational observability layer is stable and validated.
+
+---
+
 ## Project Structure
 
 ```text
