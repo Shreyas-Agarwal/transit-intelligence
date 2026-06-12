@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved
+Superseded by [ADR 0010](file:///d:/transit-intelligence/docs/adr/0010-adopt-polyglot-runtime-architecture.md)
 
 ## Context
 
