@@ -37,3 +37,13 @@ An implementation is considered complete if and only if:
 2. **Lint and Format Pass:** `pnpm run lint` and `pnpm run format:check` execute with zero issues.
 3. **Tests Succeed:** All unit, integration, and validation tests pass successfully.
 4. **Docs Updated:** Architecture overlays, API references, or ADR logs are updated to match the changes.
+
+## 5. Knowledge Sources
+
+AI agents must consult the following documents before implementing significant changes:
+
+- docs/adr/*
+- docs/design/*
+- docs/ai/skills/*
+- docs/ai/harnesses/*
+- docs/ai/context/*
