@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved
+Approved (Partially superseded by [ADR 0008](file:///D:/transit-intelligence/docs/adr/008-redpanda-as-immutable-snapshot-ledger.md), which accelerates the deployment of Redpanda into Phase 1 to serve as the platform's immutable temporal snapshot ledger)
 
 ## Context
 

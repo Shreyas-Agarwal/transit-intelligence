@@ -28,7 +28,7 @@ The web application interface for operators, transit managers, and dispatchers.
 
 The transactional state controller.
 
-- **Tech stack:** Node.js + Express + TypeScript + Prisma/PgPool.
+- **Tech stack:** Node.js + Fastify + TypeScript + Prisma/PgPool.
 - **Responsibilities:**
   - Account/User administration.
   - Route planning, static schedule assignments, and vehicle inventory management.
@@ -42,7 +42,7 @@ High-throughput polling worker retrieving live transit feeds.
 - **Responsibilities:**
   - Poll the Swiss Open Data HTTP feeds for GTFS-RT updates every 30 seconds.
   - Parse binary protobuf payloads to structured JSON records.
-  - Push parsed positions, trip delays, and schedule adjustments to the Redis cache stream and analytical store.
+  - Push parsed positions, trip delays, and schedule adjustments to the Redpanda snapshot ledger topics.
 
 ### 5. Graph Analytics Engine (Embedded)
 
