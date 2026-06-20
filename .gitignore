@@ -76,3 +76,8 @@ htmlcov/
 .tox/
 *.db
 
+
+
+*/gtfs_s/raw
+*/gtfs_s/processed
+*/gtfs_s/duckdb
