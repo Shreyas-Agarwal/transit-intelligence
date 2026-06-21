@@ -97,7 +97,7 @@ async function pollAndPublish(producer: ReturnType<typeof createProducer>): Prom
 
   // ── Publish ───────────────────────────────────────────────────────────────
   const publishStart = Date.now();
-  const BATCH_SIZE = 500;
+  const BATCH_SIZE = 100;
   for (let i = 0; i < messages.length; i += BATCH_SIZE) {
     const batch = messages.slice(i, i + BATCH_SIZE);
 
