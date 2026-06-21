@@ -76,3 +76,11 @@ htmlcov/
 .tox/
 *.db
 
+
+
+*/gtfs_s/raw
+*/gtfs_s/processed
+*/gtfs_s/duckdb
+*/gtfs_s/parquet
+
+*/*/feed_exploration_output.json
