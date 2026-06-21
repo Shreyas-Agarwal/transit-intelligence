@@ -81,3 +81,4 @@ htmlcov/
 */gtfs_s/raw
 */gtfs_s/processed
 */gtfs_s/duckdb
+*/gtfs_s/parquet
