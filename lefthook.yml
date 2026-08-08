@@ -15,7 +15,11 @@ pre-commit:
 
     markdownlint:
       glob: '*.md'
-      run: markdownlint-cli2 {staged_files}
+      # --no-globs: lint exactly the staged files (still applying
+      # .markdownlint-cli2.jsonc's rules/ignores) instead of cli2's default
+      # of adding its own configured globs (**/*.md) on top of the file
+      # list, which would re-lint the whole repo on every commit.
+      run: markdownlint-cli2 --no-globs {staged_files}
 
     vale:
       glob: '*.md'

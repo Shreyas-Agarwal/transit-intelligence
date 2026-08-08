@@ -1,0 +1,33 @@
+# Commit-message policy: Conventional Commits + DCO sign-off, enforced
+# locally via lefthook's commit-msg hook and in CI (governance workflow).
+#
+# Scopes are intentionally unrestricted (".*") rather than an enumerated
+# domain list — per ADR 0013, this file must not need editing every time a
+# domain is added or renamed.
+policies:
+  - type: commit
+    spec:
+      dco: true
+      header:
+        length: 89
+        imperative: true
+        case: lower
+        invalidLastCharacters: .
+      body:
+        required: false
+      conventional:
+        types:
+          - feat
+          - fix
+          - docs
+          - style
+          - refactor
+          - perf
+          - test
+          - chore
+          - ci
+          - build
+          - revert
+        scopes:
+          - .*
+        descriptionLength: 72
