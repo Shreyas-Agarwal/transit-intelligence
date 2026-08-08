@@ -18,12 +18,12 @@ class ZurichSubsetBuilder:
                 )
             )
         )
-    
+
     def build_trip_ids(
         self,
         stops: pl.DataFrame
     ) -> pl.DataFrame:
-        
+
         return (
             GtfsLoader.stop_times()
             .join(
@@ -40,7 +40,7 @@ class ZurichSubsetBuilder:
         self,
         trip_ids: pl.DataFrame
     ) -> pl.DataFrame:
-        
+
         return (
             GtfsLoader.trips()
             .join(
@@ -55,7 +55,7 @@ class ZurichSubsetBuilder:
         self,
         trips: pl.DataFrame
     ) -> pl.DataFrame:
-        
+
         return (
             GtfsLoader.routes()
             .join(
@@ -73,9 +73,9 @@ class ZurichSubsetBuilder:
         zurich_stops: pl.DataFrame,
         zurich_trips: pl.DataFrame
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
-        
+
         stop_times = GtfsLoader.stop_times()
-        
+
         # Only process stop times for our known Zurich trips
         # to avoid scanning everything unnecessarily
         relevant_stop_times = stop_times.join(
@@ -83,7 +83,7 @@ class ZurichSubsetBuilder:
             on="trip_id",
             how="semi"
         )
-        
+
         trip_stop_counts = (
             relevant_stop_times
             .group_by("trip_id")
@@ -115,21 +115,21 @@ class ZurichSubsetBuilder:
                 .alias("trip_type")
             )
         )
-        
+
         classified_trips = (
             zurich_trips.lazy()
             .join(trip_classification, on="trip_id", how="inner")
             .collect()
         )
-        
+
         internal_trips = classified_trips.filter(
             pl.col("trip_type") == "internal"
         ).drop("trip_type", "total_stops", "zurich_stops")
-        
+
         crossing_trips = classified_trips.filter(
             pl.col("trip_type") == "crossing"
         ).drop("trip_type", "total_stops", "zurich_stops")
-        
+
         return internal_trips, crossing_trips
 
     def build_classified_routes(
@@ -138,12 +138,12 @@ class ZurichSubsetBuilder:
         internal_trips: pl.DataFrame,
         crossing_trips: pl.DataFrame
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        
+
         internal = internal_trips.lazy().with_columns(pl.lit("internal").alias("trip_type"))
         crossing = crossing_trips.lazy().with_columns(pl.lit("crossing").alias("trip_type"))
-        
+
         classified_trips = pl.concat([internal, crossing])
-        
+
         route_classification = (
             classified_trips
             .group_by("route_id")
@@ -157,25 +157,25 @@ class ZurichSubsetBuilder:
                 .alias("classification")
             )
         )
-        
+
         classified_routes = (
             zurich_routes.lazy()
             .join(route_classification, on="route_id", how="inner")
             .collect()
         )
-        
+
         internal_routes = classified_routes.filter(
             pl.col("classification") == "internal"
         ).drop("classification", "trip_type")
-        
+
         crossing_routes = classified_routes.filter(
             pl.col("classification") == "crossing"
         ).drop("classification", "trip_type")
-        
+
         mixed_routes = classified_routes.filter(
             pl.col("classification") == "mixed"
         ).drop("classification", "trip_type")
-        
+
         return internal_routes, crossing_routes, mixed_routes
 
     def build_stop_times(
