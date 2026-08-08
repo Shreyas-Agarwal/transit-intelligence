@@ -36,4 +36,8 @@ commit-msg:
 pre-push:
   commands:
     gitleaks:
+      # use_stdin: lefthook doesn't forward git's stdin (the pushed ref
+      # list) to commands by default. Without it, the script's `while read`
+      # loop blocks forever waiting on input that never arrives.
+      use_stdin: true
       run: bash tools/governance/hooks/gitleaks-pre-push.sh
