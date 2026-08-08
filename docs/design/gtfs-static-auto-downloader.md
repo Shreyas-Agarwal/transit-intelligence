@@ -79,14 +79,16 @@ flowchart TD
     B -- yes --> Z[Skip]
     B -- no --> C[Download archive to staging]
     C --> D[Verify archive]
-    D --> E[Extract to staging directory]
-    E --> F[Validate GTFS structure]
-    F --> G[Atomic rename staging → final]
-    G --> H[Write per-snapshot metadata sidecar]
-    H --> I[Rebuild/update manifest index]
-    I --> J{Newer than current latest?}
-    J -- yes --> K[Advance latest symlink]
-    J -- no --> L[Leave as superseded/backfill]
+    D --> E[Extract CSVs to staging directory]
+    E --> F[Validate GTFS structure - Tier 1]
+    F --> G[Convert every CSV to Parquet in staging]
+    G --> H[Delete CSV staging + zip]
+    H --> I[Atomic rename Parquet staging → final]
+    I --> J[Write per-snapshot metadata sidecar]
+    J --> K[Rebuild/update manifest index]
+    K --> L{Newer than current latest?}
+    L -- yes --> M[Advance latest symlink]
+    L -- no --> N[Leave as superseded/backfill]
 ```
 
 "Already installed?" is answered by the filesystem (a `raw/<version>/` directory with a valid metadata sidecar exists), not by the manifest — see below.
@@ -98,26 +100,26 @@ This design intentionally spans two very different kinds of work, and deliberate
 ```mermaid
 flowchart LR
     subgraph rust["Rust — this design's scope"]
-        R1[Download] --> R2[Validate archive]
+        R1[Download] --> R2[Validate archive] --> R3[Convert CSV → Parquet]
     end
     subgraph analytics["DuckDB + SQLMesh — downstream, separate scope"]
-        D1[Load raw CSV] --> D2[Subset] --> D3[Derived tables] --> D4[Persist]
+        D1[Load Parquet] --> D2[Subset] --> D3[Derived tables] --> D4[Persist]
     end
-    R2 --> D1
+    R3 --> D1
 ```
 
-* **Rust owns the downloader** described in this document: network I/O, filesystem staging, zip decompression, checksums, atomic rename, and locking. These are exactly the things Rust is good at, and everything in this doc through §7 (Symlink update) is scoped to this binary.
-* **DuckDB + SQLMesh own everything downstream of "a raw snapshot is on disk"**: loading the raw CSVs, deriving the Zurich subset (today's ADR 0011 pipeline), building the semantic/network model (Sprint 04), and persisting Parquet artifacts. This is reasoning about the data's content, not moving bytes — Python/SQL tooling is the right fit, matching ADR 0010's own framing ("is this service primarily moving information, or reasoning about information?").
+* **Rust owns the downloader** described in this document: network I/O, filesystem staging, zip decompression, checksums, CSV → Parquet conversion, atomic rename, and locking. These are exactly the things Rust is good at, and everything in this doc through §7 (Symlink update) is scoped to this binary.
+* **DuckDB + SQLMesh own everything downstream of "a validated snapshot is on disk as Parquet"**: loading the Parquet tables, deriving the Zurich subset (today's ADR 0011 pipeline), building the semantic/network model (Sprint 04), and persisting further derived Parquet artifacts. This is reasoning about the data's content, not moving bytes — Python/SQL tooling is the right fit, matching ADR 0010's own framing ("is this service primarily moving information, or reasoning about information?").
 
-This split has a direct consequence for validation (§6): the Rust downloader only ever checks the archive is structurally sound. It does **not** parse CSV content, check columns, or verify referential integrity — those checks require an actual tabular engine and are SQLMesh's job, running later, against data the downloader has already published. `status: verified` in this design's manifest therefore means "safe to hand to the DuckDB/SQLMesh layer," not "content-validated" — see the revised §4 and §6 below.
+This split has a direct consequence for validation (§6): the Rust downloader only ever checks the archive is structurally sound. It does **not** parse CSV content for meaning, check columns, or verify referential integrity — those checks require an actual tabular engine and are SQLMesh's job, running later, against data the downloader has already published. The CSV → Parquet conversion (§6.5) sits on the Rust side of this line for the same reason download/checksumming does: it's a bytes-format conversion (every column round-trips as a string), not GTFS-typed reasoning about what the columns mean. `status: verified` in this design's manifest therefore means "safe to hand to the DuckDB/SQLMesh layer," not "content-validated" — see the revised §4 and §6 below.
 
-The downloader lives at `domains/ingestion/ckan/` — a member crate of the `domains/ingestion` Cargo workspace (`domains/ingestion/Cargo.toml`), alongside the other ingestion-facing Rust crates:
+The downloader lives at `domains/ingestion/extract/ckan/` — a member crate of the `domains/ingestion/extract` Cargo workspace (`domains/ingestion/extract/Cargo.toml`), alongside the other ingestion-facing Rust crates:
 
 ```text
-domains/ingestion/
+domains/ingestion/extract/
   Cargo.toml          # workspace manifest — members: common, ckan, realtime, service-alerts
   common/             # shared crate (ti-common) — config loading, error types, etc.
-  ckan/               # this design: CKAN version detection + GTFS-S download/verify/publish
+  ckan/               # this design: CKAN version detection + GTFS-S download/verify/convert/publish
   realtime/           # GTFS-RT ingestion
   service-alerts/     # service alerts ingestion
 ```
@@ -239,7 +241,7 @@ Each version ends up in exactly one terminal state:
 | `superseded` | Was `verified` at some point; a newer version has since become `latest`. Still on disk, still valid — kept for history/rollback, not pruned by this design (see Non-goals). |
 | `failed` | Attempted and rejected at some stage (bad download, failed validation, etc.). Staging artifacts are removed; the directory under its final name is **never created** for a failed version, so `failed` never risks being mistaken for an installed snapshot. |
 
-There is deliberately no persisted `latest`/`active` status on the version itself — "is this the current one" is answered by whether the `latest` symlink points at it, which can change without rewriting that version's sidecar. The manifest's top-level `latest` field and the actual symlink target must always agree; the implementation should assert this on every run and treat a mismatch as a bug to fix, not a state to tolerate.
+The version itself deliberately carries no persisted `latest`/`active` status — "is this the current one" is answered by whether the `latest` symlink points at it, which can change without rewriting that version's sidecar. The manifest's top-level `latest` field and the actual symlink target must always agree; the implementation should assert this on every run and treat a mismatch as a bug to fix, not a state to tolerate.
 
 ### 5. Pipeline stages in detail
 
@@ -247,12 +249,14 @@ For each upstream version not yet installed (per the filesystem check above), ol
 
 1. **Download** — stream the zip to a staging path (not under `raw/` yet), e.g. `raw/.staging/gtfs_fp2026_20260805.zip.part`, renamed to `.zip` only once the stream completes without error.
 2. **Verify archive** — compare downloaded byte count against the `Content-Length` response header (catches truncated transfers), compute `archive_sha256`. This happens **before** extraction, so we never spend time unzipping something we already know is broken.
-3. **Extract to staging** — unzip into a staging directory, e.g. `raw/.staging/gtfs_fp2026_20260805/`, never directly under its final name.
+3. **Extract to staging** — unzip into a CSV staging directory, e.g. `raw/.staging/gtfs_fp2026_20260805/`, never directly under its final name.
 4. **Validate archive structure** — see next section. Runs against the *staging* directory, before anything is promoted. This is an archive-level check only (the Rust binary's job ends here) — it does not parse CSV content.
-5. **Atomic rename** — only on successful validation, `rename()` the staging directory to its final name (`raw/gtfs_fp2026_20260805/`). Same-filesystem renames are atomic, so this is the one moment a snapshot goes from "doesn't exist" to "fully exists" — there is no intermediate state a concurrent reader could observe.
-6. **Write sidecar, update manifest, advance `latest`** — in that order, per the sections above.
+5. **Convert to Parquet** — see §6.5. Every `*.txt` member present in the CSV staging directory is converted to a same-named `*.parquet` file in a *separate* Parquet staging directory, e.g. `raw/.staging/gtfs_fp2026_20260805.parquet/`. Only runs after Tier 1 validation passes, so a structurally-broken archive never gets converted.
+6. **Delete CSV staging + zip** — once conversion succeeds, the CSVs and the zip are both scratch; delete them. Parquet is what gets retained (§8).
+7. **Atomic rename** — `rename()` the *Parquet* staging directory to its final name (`raw/gtfs_fp2026_20260805/`). Same-filesystem renames are atomic, so this is the one moment a snapshot goes from "doesn't exist" to "fully exists" — there is no intermediate state a concurrent reader could observe.
+8. **Write sidecar, update manifest, advance `latest`** — in that order, per the sections above.
 
-On failure at any stage: delete whatever staging artifacts exist for that version, do **not** create `raw/<version>/`, and record the outcome (see [Recovery](#12-recovery) for what "record" means when the process itself died mid-stage rather than failing cleanly).
+On failure at any stage: delete whatever staging artifacts exist for that version (both the CSV and Parquet staging directories), do **not** create `raw/<version>/`, and record the outcome (see [Recovery](#12-recovery) for what "record" means when the process itself died mid-stage rather than failing cleanly).
 
 ### 6. Validation: archive-level (Rust, this design) vs. content-level (DuckDB/SQLMesh, downstream)
 
@@ -268,6 +272,20 @@ Performed by the Rust binary against the zip's central directory and the extract
 
 This is cheap, fast, and squarely in Rust's wheelhouse (zip/filesystem metadata, no tabular reasoning). It's also a weaker guarantee than the original draft implied: "**Tier 1 passed**" means *the archive is intact and shaped like a GTFS feed*, not that its contents are semantically valid GTFS. That distinction is now explicit in the [status model](#4-status-model) — `verified` covers Tier 1 only.
 
+### 6.5. Storage format conversion: CSV → Parquet (Rust, this design)
+
+Immediately after Tier 1 passes — and still entirely on the Rust side of the [language boundary](#language--tooling-boundary) — every extracted `*.txt` member is converted to a same-named `*.parquet` file. Parquet is the canonical, permanently-persisted format; the CSVs that come out of the zip are transient staging artifacts, never present at a snapshot's final path.
+
+**Why this is Rust's job, not SQLMesh's**: this is a bytes-format conversion, not GTFS-typed reasoning. Every column is read and written as a plain string — there's no attempt to infer that `stop_lat` is a float or `stop_sequence` is an integer; that typing happens downstream, at query time, in the SQLMesh models that already cast explicit types per column (§6, Tier 2). Treating every column as a string also sidesteps GTFS's usual CSV type hazards (times past `24:00:00`, blank-vs-null optional fields, leading zeros in IDs) that a type-inferring converter would have to special-case.
+
+**Why it's worth doing at all**: this dataset is highly repetitive (route IDs, stop IDs, service IDs, coordinates that cluster geographically), which is exactly what Parquet's dictionary encoding and columnar compression are good at. Observed on this feed: a ~150 MB CSV member compresses to roughly 5 MB as Parquet — meaningfully cheaper storage from the very first snapshot, before the indefinite-retention decision in §8 has a chance to compound it across dozens of snapshots.
+
+Mechanics:
+
+* Runs against the CSV staging directory from step 3, writing into a separate Parquet staging directory — never in place, and never touching the final snapshot path until the atomic rename in step 7.
+* Every `*.txt` file present is converted, not just the Tier 1 required members — so an optional file (`agency.txt`, `frequencies.txt`) that happens to be present still ends up in the persisted snapshot, just as Parquet.
+* A conversion failure is treated exactly like a Tier 1 validation failure: staging is discarded, the version is recorded as `failed`, `raw/<version>/` is never created, and `latest` never moves (see [Failure modes](#failure-modes-to-handle-explicitly)).
+
 #### Tier 2 — content-level (downstream, not run automatically by the downloader in v1)
 
 This is where the checks from the original draft still apply, just relocated:
@@ -275,9 +293,8 @@ This is where the checks from the original draft still apply, just relocated:
 * **Parseability & required columns** — e.g. `stops.stop_id`/`stop_name`/`stop_lat`/`stop_lon`, `trips.trip_id`/`route_id`, `stop_times.trip_id`/`stop_id`/`stop_sequence` — drift here should fail loudly instead of surfacing as a confusing error three pipeline stages later.
 * **Row-count sanity** — within a sane order of magnitude of what ADR 0011 documented (hundreds of thousands to tens of millions of rows depending on the table), not just `> 0`.
 * **Referential integrity** — every `trips.route_id` resolves to a `routes.route_id`; every `stop_times.trip_id`/`stop_id` resolves to `trips`/`stops`.
-* **Geographic sanity** — `stops.stop_lat`/`stop_lon` fall within Switzerland's bounding box (roughly lat 45.8–47.9, lon 5.9–10.5). Since ADR 0011's Zurich subset is derived purely from `stop_name`, garbage coordinates wouldn't even trip that pipeline's own logic — this check exists specifically to catch that blind spot.
 
-**Technology**: DuckDB loading the raw CSVs, with these invariants expressed as **SQLMesh audits** on the models that load and subset the data — row-count and range checks, and referential-integrity anti-join checks, are exactly what SQLMesh's audit framework is for, and this gives versioned, independently-runnable tests instead of ad-hoc scripts. This lives in the DuckDB/SQLMesh layer shown above, not in this downloader's codebase.
+**Technology**: DuckDB loading the persisted Parquet files (§6.5) — not the CSVs, which no longer exist past the conversion step — with these invariants expressed as **SQLMesh audits** on the models that load and subset the data — row-count and range checks, and referential-integrity anti-join checks, are exactly what SQLMesh's audit framework is for, and this gives versioned, independently-runnable tests instead of ad-hoc scripts. This lives in the DuckDB/SQLMesh layer shown above, not in this downloader's codebase.
 
 Per the resolved decision in Non-goals, **the downloader does not trigger this tier automatically in v1** — a `verified` snapshot sits on disk and behind `latest` without its content having been checked yet. Content validation happens whenever the SQLMesh subset pipeline next runs against it (manually, for now). This is a real gap worth naming plainly: between a snapshot becoming `latest` and someone next running the subset pipeline, `latest` could point at archive-sound-but-content-broken data. Automatic triggering (or at least automatic Tier 2 validation without full pipeline execution) is the natural next iteration once both halves exist — see Non-goals and the relevant open question.
 
@@ -297,9 +314,11 @@ The `latest` pointer only ever advances to a newer version. The updater should n
 
 ### 8. Retention
 
-**Decided:** every downloaded snapshot is retained indefinitely. The downloader never deletes a `verified` or `superseded` snapshot directory.
+**Decided:** every downloaded snapshot is retained indefinitely, as Parquet (§6.5) — never as the raw CSVs, which are staging-only and deleted once conversion succeeds. The downloader never deletes a `verified` or `superseded` snapshot directory.
 
-Storage lifecycle is treated as an infrastructure concern, not a downloader concern — if retained snapshots become material in storage cost, older ones can be moved to lower-cost object storage (e.g. a MinIO lifecycle policy, or an S3-Glacier-equivalent tier) entirely outside this design, without the downloader's logic changing. The downloader's contract is "snapshots exist at `extract_path` and are never silently removed by it" — where they physically live over time is a separate, later decision.
+Parquet's compression is what makes "indefinite" cheap from the first snapshot rather than something to revisit later: observed on this feed, converting from CSV to Parquet shrinks a ~150 MB member to roughly 5 MB, so retaining every snapshot indefinitely doesn't imply retaining every snapshot's CSV-sized footprint.
+
+Storage lifecycle is treated as an infrastructure concern, not a downloader concern — if retained snapshots become material in storage cost even as Parquet, older ones can be moved to lower-cost object storage (e.g. a MinIO lifecycle policy, or an S3-Glacier-equivalent tier) entirely outside this design, without the downloader's logic changing. The downloader's contract is "Parquet snapshots exist at `extract_path` and are never silently removed by it" — where they physically live over time is a separate, later decision.
 
 ### 9. Consumer cutover
 
@@ -320,6 +339,8 @@ GTFS_DIR = RAW_DIR / "latest"
 Two changes bundled together, not one: this both adopts the `latest` symlink *and* repoints `RAW_DIR` at `data/bronze/static/`, the location the automated downloader actually writes to (see the storage location note under [Current state (baseline)](#current-state-baseline) — it differs from what earlier drafts of this design, and the runbook, assumed). Until this cutover happens, `transit_subset/paths.py` will keep globbing the old, no-longer-updated `domains/gtfs_s/raw/` directory and won't see any snapshot the automated downloader publishes.
 
 This is a follow-up change once the downloader is proven to keep the symlink correct — not part of this implementation.
+
+**Format consequence of §6.5**: whichever consumer eventually reads `data/bronze/static/latest`, it must load Parquet (`stops.parquet`, `trips.parquet`, …), not CSV — the raw `.txt` members the downloader used to leave on disk no longer exist past the conversion step. `GtfsLoader` in `domains/gtfs_s/scripts/transit_subset/loader.py` currently calls `pl.read_csv`/`pl.scan_csv` against `GTFS_DIR / "stops.txt"` etc.; any replacement (that loader, or the newer `domains/ingestion/transform` SQLMesh project) needs `pl.read_parquet`/`pl.scan_parquet` (or DuckDB's `read_parquet`) against `GTFS_DIR / "stops.parquet"` instead.
 
 ### 10. Scheduling
 
@@ -345,7 +366,7 @@ The pipeline is designed so that **the only unsafe moment is inside a single sta
 
 | Left behind after a crash | Why it's safe | Recovery action |
 | --- | --- | --- |
-| A file under `raw/.staging/*.zip.part` or `raw/.staging/<version>/` | Staging paths are never treated as installed by the "already installed?" check | Delete on next run's startup, unconditionally, before doing anything else. Staging is always disposable. |
+| A file/directory under `raw/.staging/*.zip.part`, `raw/.staging/<version>/` (CSV), or `raw/.staging/<version>.parquet/` (Parquet) | Staging paths are never treated as installed by the "already installed?" check | Delete on next run's startup, unconditionally, before doing anything else. Staging is always disposable. |
 | `raw/.updater.lock` with a dead PID | Lock only gates concurrent runs, carries no data | Detected and cleared by the staleness check in Locking, step 2. |
 | A `raw/<version>/` directory that exists but has no `.snapshot-meta.json` | Can only happen if something bypassed the atomic-rename step (e.g. manual filesystem tampering) — the pipeline itself never leaves this state, since the sidecar is written immediately after the rename and nothing else creates `raw/<version>/` | Not treated as installed (sidecar is the source of truth per step 2); safe to re-run, which re-downloads and overwrites it. Worth a startup warning since it indicates something outside the pipeline touched `raw/`. |
 | `raw/.manifest.json` missing, truncated, or stale relative to the sidecars | It's a derived cache, never authoritative | Regenerate from `raw/*/.snapshot-meta.json` before doing anything else on every run — not just when it's detected missing, so drift can't accumulate silently. |
@@ -362,6 +383,7 @@ The general recovery posture: **on every run, before touching the network, clean
 | Upstream unreachable / API returns error | Log and exit non-zero; `latest` and manifest untouched. No partial state. |
 | Zip downloads but is corrupt / fails to extract | Discard staging artifacts, record `status: failed` outcome, do not create `raw/<version>/`, retry next run. |
 | Extracted snapshot fails structural GTFS validation | Same handling as above — don't let a malformed snapshot become `latest`. |
+| CSV → Parquet conversion fails (§6.5) after Tier 1 passes | Same handling as above — discard both CSV and Parquet staging, record `status: failed`, do not create `raw/<version>/`. |
 | Two runs overlap (e.g. a slow run still going when the next scheduled run fires) | Prevented by the locking protocol above, not just noted as a risk. |
 | Process is killed mid-run (OOM, host reboot, manual kill) | Covered by Recovery above — staging is disposable, the lock self-heals, the manifest is regenerable. |
 | Disk fills up from retained snapshots | Accepted per the [Retention](#8-retention) decision — indefinite retention is intentional; if it becomes a real problem, it's solved at the infrastructure/storage layer, not by changing this design. |

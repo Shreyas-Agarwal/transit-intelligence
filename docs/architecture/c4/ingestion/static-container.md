@@ -15,11 +15,11 @@ C4Container
     System_Ext(subset_pipeline, "GTFS-S Subset Pipeline", "Python + DuckDB/SQLMesh, downstream, not automatically triggered")
 
     Container_Boundary(downloader, "GTFS-S Auto-Downloader") {
-        Container(ckan_bin, "ckan", "Rust binary (Tokio async runtime)", "One-shot CLI: recovery, version detection, download/verify/extract/validate/publish pipeline, locking, latest symlink.")
+        Container(ckan_bin, "ckan", "Rust binary (Tokio async runtime)", "One-shot CLI: recovery, version detection, download/verify/extract/validate/convert-to-parquet/publish pipeline, locking, latest symlink.")
         Container(ti_common, "ti-common", "Rust library", "Shared across all domains/ingestion crates: env config loading, HTTP client construction, bearer-token auth, retry/backoff, tracing setup.")
     }
 
-    ContainerDb(raw_store, "Raw Snapshot Store", "Local filesystem — data/bronze/static/", "Per-version snapshot directories + .snapshot-meta.json sidecars, .manifest.json rollup, latest symlink, .updater.lock, .staging/ scratch space.")
+    ContainerDb(raw_store, "Raw Snapshot Store", "Local filesystem — data/bronze/static/", "Per-version snapshot directories containing Parquet files (one per GTFS member) + .snapshot-meta.json sidecars, .manifest.json rollup, latest symlink, .updater.lock, .staging/ scratch space. CSV never lands here — only in .staging/ during conversion.")
 
     Rel(scheduler, ckan_bin, "Invokes")
     Rel(ckan_bin, ti_common, "Uses for config, HTTP client, auth, retry, logging")

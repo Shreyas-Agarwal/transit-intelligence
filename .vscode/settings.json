@@ -1,0 +1,149 @@
+{
+  // =========================================================================
+  // General
+  // =========================================================================
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "files.trimFinalNewlines": true,
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "explicit",
+    "source.organizeImports": "explicit"
+  },
+  "editor.rulers": [
+    100
+  ],
+  "editor.renderWhitespace": "selection",
+  "editor.bracketPairColorization.enabled": true,
+  "editor.guides.bracketPairs": true,
+  "editor.stickyScroll.enabled": true,
+  "explorer.confirmDelete": false,
+  "explorer.confirmDragAndDrop": false,
+  "terminal.integrated.defaultProfile.linux": "bash",
+  // =========================================================================
+  // Exclude generated files
+  // =========================================================================
+  "files.exclude": {
+    "**/.DS_Store": true,
+    "**/.pytest_cache": true,
+    "**/__pycache__": true,
+    "**/.ruff_cache": true,
+    "**/.mypy_cache": true,
+    "**/.sqlmesh": true,
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/target": true,
+    "**/.turbo": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/target": true,
+    "**/.turbo": true,
+    "**/.sqlmesh": true
+  },
+  // =========================================================================
+  // Python
+  // =========================================================================
+  "python.terminal.activateEnvironment": true,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    }
+  },
+  "ruff.nativeServer": "on",
+  "ruff.organizeImports": true,
+  // =========================================================================
+  // Rust
+  // =========================================================================
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.procMacro.enable": true,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  },
+  // =========================================================================
+  // TypeScript / JavaScript
+  // =========================================================================
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[javascriptreact]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  // =========================================================================
+  // JSON
+  // =========================================================================
+  "[json]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  // =========================================================================
+  // TOML
+  // =========================================================================
+  "[toml]": {
+    "editor.defaultFormatter": "tamasfe.even-better-toml"
+  },
+  // =========================================================================
+  // YAML
+  // =========================================================================
+  "[yaml]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  // =========================================================================
+  // Markdown
+  // =========================================================================
+  "[markdown]": {
+    "editor.defaultFormatter": "yzhang.markdown-all-in-one",
+    "editor.wordWrap": "on"
+  },
+  // =========================================================================
+  // SQL
+  // =========================================================================
+  "[sql]": {
+    "editor.wordWrap": "off"
+  },
+  // =========================================================================
+  // Git
+  // =========================================================================
+  "git.autofetch": true,
+  "git.confirmSync": false,
+  // =========================================================================
+  // Rust
+  // =========================================================================
+  "rust-analyzer.linkedProjects": [
+    "domains/ingestion/extract/Cargo.toml"
+  ],
+  // =========================================================================
+  // Spell checking
+  // =========================================================================
+  "cSpell.words": [
+    "CKAN",
+    "DuckDB",
+    "Fastify",
+    "GTFS",
+    "GTFSRT",
+    "MinIO",
+    "mise",
+    "Parquet",
+    "Polars",
+    "Redpanda",
+    "SQLMesh",
+    "TransitIQ",
+    "Tokio"
+  ]
+}

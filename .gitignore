@@ -16,7 +16,8 @@ logs
 
 # IDE / Editor folders
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.suo
 *.ntvs*
 *.njsproj

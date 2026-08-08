@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+
+members = ["common", "ckan", "realtime", "service-alerts"]
+
+default-members = ["ckan", "realtime"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+cargo = "warn"
+
+[workspace.dependencies]
+
+# async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.13", features = ["json", "gzip", "brotli", "stream"] }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# configuration
+config = "0.15"
+
+# dotenv
+dotenvy = "0.15"
+
+# dates
+chrono = { version = "0.4", features = ["serde"] }
+
+# hashing
+sha2 = "0.11"
+
+# filesystem
+walkdir = "2"
+
+# zip archive reading/extraction
+zip = "2"
+
+# CSV -> Parquet conversion (bytes-format conversion only, no GTFS-typed
+# reasoning — every column is read/written as Utf8; see ckan's parquet.rs)
+arrow-csv = { version = "59.2.0", default-features = false }
+arrow-schema = { version = "59.2.0", default-features = false }
+arrow-array = { version = "59.2.0", default-features = false }
+parquet = { version = "59.2.0", default-features = false, features = ["zstd", "arrow"] }
+
+# errors
+anyhow = "1"
+thiserror = "2"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# async traits
+async-trait = "0.1"
+
+# protobuf (GTFS-RT decoding)
+prost = "0.14"
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+# kafka/redpanda client — pure Rust (no librdkafka/cmake toolchain required)
+rskafka = "0.6"

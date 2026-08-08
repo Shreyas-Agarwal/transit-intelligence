@@ -1,6 +1,6 @@
 [tools]
 python = "latest"
-rust = "latest"
+rust = { version = "latest", components = "rustfmt,clippy" }
 uv = "latest"
 
 # --- Repository governance tooling ---
@@ -19,15 +19,21 @@ node = "24"
 
 [tasks."ingestion:gtfs-static"]
 description = "Run the GTFS-S static downloader: detect, download, verify, and publish new snapshots (docs/design/gtfs-static-auto-downloader.md)"
-dir = "domains/ingestion"
+dir = "domains/ingestion/extract"
 run = "cargo run --release -p ckan"
 
 [tasks."ingestion:realtime"]
 description = "Run the GTFS-RT realtime ingestion worker: poll the feed and publish decoded snapshots to Redpanda (ADR 0007, ADR 0008)"
-dir = "domains/ingestion"
+dir = "domains/ingestion/extract"
 run = "cargo run --release -p realtime -- run"
 
 [tasks."ingestion:realtime:explore"]
 description = "One-shot GTFS-RT feed exploration — fetch, decode, and summarise the feed's contents (docs/design/gtfs-rt-feed-structure.md)"
-dir = "domains/ingestion"
+dir = "domains/ingestion/extract"
 run = "cargo run -p realtime -- explore"
+
+[tasks."ingestion:transform"]
+description = "Run the GTFS-S transform stage: validate a Bronze snapshot and derive the Zurich Silver subset. Mode defaults to 'latest' (just the latest Bronze snapshot); pass 'replay' to reprocess every retained snapshot: mise run ingestion:transform replay"
+dir = "domains/ingestion/transform"
+usage = "arg \"mode\" default=\"latest\""
+run = "uv run python -m ingestion.transform \"${usage_mode}\""

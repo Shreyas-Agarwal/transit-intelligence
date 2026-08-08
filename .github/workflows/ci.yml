@@ -4,7 +4,7 @@ name: Continuous Integration
 # rather than owning a shared build. This workflow never names a domain or
 # its language: it lists domains/*/ directories at run time and runs `make
 # ci` in each — a convention every domain is expected to provide (see
-# domains/ingestion/Makefile, domains/gtfs_s/Makefile). Adding a domain never
+# domains/ingestion/Makefile). Adding a domain never
 # requires editing this file.
 #
 # Toolchains for every domain (Rust, Python/uv, ...) come from the repo-root
