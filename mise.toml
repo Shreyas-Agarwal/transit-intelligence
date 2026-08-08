@@ -9,3 +9,13 @@ uv = "latest"
 description = "Run the GTFS-S static downloader: detect, download, verify, and publish new snapshots (docs/design/gtfs-static-auto-downloader.md)"
 dir = "domains/ingestion"
 run = "cargo run --release -p ckan"
+
+[tasks."ingestion:realtime"]
+description = "Run the GTFS-RT realtime ingestion worker: poll the feed and publish decoded snapshots to Redpanda (ADR 0007, ADR 0008)"
+dir = "domains/ingestion"
+run = "cargo run --release -p realtime -- run"
+
+[tasks."ingestion:realtime:explore"]
+description = "One-shot GTFS-RT feed exploration — fetch, decode, and summarise the feed's contents (docs/design/gtfs-rt-feed-structure.md)"
+dir = "domains/ingestion"
+run = "cargo run -p realtime -- explore"

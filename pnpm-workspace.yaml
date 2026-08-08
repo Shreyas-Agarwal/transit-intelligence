@@ -7,5 +7,3 @@ engineStrict: true
 allowBuilds:
   duckdb: true
   'esbuild': true
-  protobufjs: true
-  kafkajs: true

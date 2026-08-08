@@ -63,7 +63,7 @@ rpk cluster info
 
 ## Topic Management
 
-Topics are created automatically when the ingestion worker starts (`ensureTopics()` in `client.ts`). You can also manage them manually:
+Topics are created automatically when the ingestion worker starts (`RedpandaProducer::ensure_topics()` in `domains/ingestion/realtime/src/producer.rs`) — though note that step only sets partition count and replication factor; `retention.ms` still needs the `rpk topic alter-config` command below, since `rskafka`'s topic creation doesn't accept broker-side config entries. You can also manage topics manually:
 
 ```bash
 # List all topics
@@ -86,6 +86,9 @@ rpk topic consume transit.snapshots.raw --offset start
 
 # Consume only N messages
 rpk topic consume transit.snapshots.raw --num 5
+
+# Set retention on transit.snapshots.raw (7 days) — not set by ensure_topics()
+rpk topic alter-config transit.snapshots.raw --set retention.ms=604800000
 ```
 
 ---
@@ -101,15 +104,15 @@ rpk topic consume transit.snapshots.raw --num 5
 
 ---
 
-## Connectivity from Windows (Node.js / TypeScript)
+## Connectivity from Windows (Rust ingestion worker)
 
-WSL2 automatically forwards `localhost` ports to the Windows host. The ingestion worker connects using:
+WSL2 automatically forwards `localhost` ports to the Windows host. The ingestion worker (`domains/ingestion/realtime`, built on `rskafka`) connects using:
 
 ```
 REDPANDA_BROKERS=localhost:9092
 ```
 
-No additional configuration is required. KafkaJS connects to `localhost:9092` on Windows and WSL2's NAT layer routes it to the Redpanda broker.
+No additional configuration is required. `rskafka` connects to `localhost:9092` on Windows and WSL2's NAT layer routes it to the Redpanda broker.
 
 ---
 

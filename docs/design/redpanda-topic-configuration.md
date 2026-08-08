@@ -142,7 +142,7 @@ alert.{sha256[0:12]}   → Alert entities
 # List all topics
 rpk topic list
 
-# Create all Phase 1 topics manually (also done automatically by ensureTopics())
+# Create all Phase 1 topics manually (also done automatically by RedpandaProducer::ensure_topics())
 rpk topic create transit.snapshots.raw         --partitions 1 --replicas 1
 rpk topic create transit.snapshots.normalized  --partitions 1 --replicas 1
 rpk topic create transit.state.deltas          --partitions 1 --replicas 1
