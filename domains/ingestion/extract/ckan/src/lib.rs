@@ -12,5 +12,6 @@ pub mod download;
 pub mod lock;
 pub mod manifest;
 pub mod paths;
+pub mod parquet_convert;
 pub mod pipeline;
 pub mod symlink;

@@ -13,6 +13,7 @@ use crate::domain::{UpstreamResource, VersionId};
 use crate::download::{self, DownloadError};
 use crate::lock::{LockError, UpdaterLock};
 use crate::manifest::{self, Manifest, SidecarStatus, SnapshotMeta};
+use crate::parquet_convert::{self, ParquetError};
 use crate::paths::RawLayout;
 use crate::symlink::{self, SymlinkError};
 
@@ -26,6 +27,8 @@ pub enum PipelineError {
     Download(#[from] DownloadError),
     #[error("archive validation failed: {0}")]
     Archive(#[from] ArchiveError),
+    #[error("CSV -> Parquet conversion failed: {0}")]
+    Parquet(#[from] ParquetError),
     #[error("symlink update failed: {0}")]
     Symlink(#[from] SymlinkError),
     #[error("io error: {0}")]
@@ -238,9 +241,9 @@ fn clean_staging(layout: &RawLayout) -> Result<(), PipelineError> {
 }
 
 /// Runs one version through download → verify size → extract → validate →
-/// atomic rename → sidecar. Any failure here is reported to the caller, which
-/// records it as `failed` for this run and moves on — it never becomes
-/// `raw/<version>/` and never risks becoming `latest`.
+/// convert to Parquet → atomic rename → sidecar. Any failure here is reported
+/// to the caller, which records it as `failed` for this run and moves on — it
+/// never becomes `raw/<version>/` and never risks becoming `latest`.
 async fn process_version(
     http: &reqwest::Client,
     layout: &RawLayout,
@@ -250,9 +253,13 @@ async fn process_version(
     let part_path = layout.staging_part_path(&dir_name);
     let zip_path = layout.staging_zip_path(&dir_name);
     let extract_staging = layout.staging_extract_dir(&dir_name);
+    let parquet_staging = layout.staging_parquet_dir(&dir_name);
 
     if extract_staging.exists() {
         std::fs::remove_dir_all(&extract_staging)?;
+    }
+    if parquet_staging.exists() {
+        std::fs::remove_dir_all(&parquet_staging)?;
     }
 
     let downloaded_at = Utc::now();
@@ -281,24 +288,39 @@ async fn process_version(
     }
     tracing::info!(version = %resource.version, "archive-level validation passed (Tier 1)");
 
+    // Parquet is the canonical, permanently-persisted storage format (design
+    // doc §8) — the CSVs extracted above and the zip itself are both scratch
+    // once conversion succeeds. Highly compressible GTFS tables (stop_times,
+    // calendar_dates) shrink dramatically vs. raw CSV, which is the point.
+    std::fs::create_dir_all(&parquet_staging)?;
+    if let Err(e) = parquet_convert::convert_directory(&extract_staging, &parquet_staging) {
+        let _ = std::fs::remove_file(&zip_path);
+        let _ = std::fs::remove_dir_all(&extract_staging);
+        let _ = std::fs::remove_dir_all(&parquet_staging);
+        return Err(e.into());
+    }
+    std::fs::remove_dir_all(&extract_staging)?;
+    tracing::info!(version = %resource.version, "converted to parquet");
+
     let final_dir = layout.final_dir(&dir_name);
     if final_dir.exists() {
         // Only reachable for a directory with no valid sidecar (an "already
         // installed?" version would have been filtered out before we got
         // here) — e.g. a pre-existing baseline snapshot that predates this
         // pipeline, or manual filesystem tampering (design doc §12, row 3).
-        // We've now got a freshly downloaded and Tier-1-validated copy ready
-        // to go, so there's no data-loss window: replace it.
+        // We've now got a freshly downloaded, Tier-1-validated, and
+        // Parquet-converted copy ready to go, so there's no data-loss window:
+        // replace it.
         tracing::warn!(
             dir = %final_dir.display(),
             "overwriting pre-existing directory with no sidecar using freshly validated snapshot"
         );
         std::fs::remove_dir_all(&final_dir)?;
     }
-    std::fs::rename(&extract_staging, &final_dir)?;
-    // The zip itself isn't part of what this design retains (§8 retention is
-    // about extracted snapshots at extract_path); staging is disposable once
-    // its contents are published.
+    std::fs::rename(&parquet_staging, &final_dir)?;
+    // Neither the zip nor the intermediate CSVs are part of what this design
+    // retains (§8 retention is about the persisted Parquet at extract_path);
+    // staging is disposable once its contents are published.
     let _ = std::fs::remove_file(&zip_path);
 
     let meta = SnapshotMeta {

@@ -51,6 +51,13 @@ walkdir = "2"
 # zip archive reading/extraction
 zip = "2"
 
+# CSV -> Parquet conversion (bytes-format conversion only, no GTFS-typed
+# reasoning — every column is read/written as Utf8; see ckan's parquet.rs)
+arrow-csv = { version = "59.2.0", default-features = false }
+arrow-schema = { version = "59.2.0", default-features = false }
+arrow-array = { version = "59.2.0", default-features = false }
+parquet = { version = "59.2.0", default-features = false, features = ["zstd", "arrow"] }
+
 # errors
 anyhow = "1"
 thiserror = "2"

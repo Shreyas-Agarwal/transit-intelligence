@@ -42,6 +42,10 @@ pub struct SnapshotMeta {
     pub archive_sha256: String,
     pub publisher_last_modified: Option<String>,
     pub etag: Option<String>,
+    /// Directory containing this snapshot's Parquet files (one per GTFS
+    /// member, e.g. `stops.parquet`) — the canonical, permanently-persisted
+    /// storage format. The raw CSVs extracted from the archive are scratch:
+    /// deleted right after conversion, never present at this path.
     pub extract_path: String,
     pub status: SidecarStatus,
 }

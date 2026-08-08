@@ -32,9 +32,19 @@ impl RawLayout {
         self.staging_dir().join(format!("{snapshot_dir_name}.zip"))
     }
 
-    /// Staging extraction directory — never the final name.
+    /// Staging extraction directory for the raw CSVs pulled out of the zip —
+    /// never the final name, and never retained past Tier 1 validation +
+    /// Parquet conversion (design doc §6, §8).
     pub fn staging_extract_dir(&self, snapshot_dir_name: &str) -> PathBuf {
         self.staging_dir().join(snapshot_dir_name)
+    }
+
+    /// Staging directory for the Parquet files converted from the CSVs above.
+    /// This is what actually gets atomically renamed into `final_dir` — the
+    /// CSV staging directory is deleted once conversion succeeds.
+    pub fn staging_parquet_dir(&self, snapshot_dir_name: &str) -> PathBuf {
+        self.staging_dir()
+            .join(format!("{snapshot_dir_name}.parquet"))
     }
 
     pub fn final_dir(&self, snapshot_dir_name: &str) -> PathBuf {

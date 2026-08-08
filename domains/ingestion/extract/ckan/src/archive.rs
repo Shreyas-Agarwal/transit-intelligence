@@ -1,6 +1,11 @@
 //! Tier 1 (archive-level) validation and extraction — design doc §5 steps 3–4,
 //! §6. Deliberately does **not** parse any CSV content; that's Tier 2, owned by
 //! the downstream DuckDB/SQLMesh layer per the design's language boundary.
+//!
+//! Extracts to CSV staging only as an intermediate step: once this module's
+//! checks pass, [`crate::parquet_convert`] converts those CSVs to the
+//! permanently-persisted Parquet form and the CSVs themselves are discarded
+//! (design doc §8).
 
 use std::path::Path;
 
