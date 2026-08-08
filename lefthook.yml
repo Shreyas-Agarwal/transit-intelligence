@@ -1,0 +1,35 @@
+# Repository governance — commit-time checks. Per ADR 0013, these operate on
+# file patterns and staged diffs only; they never invoke a domain's own
+# build/lint/test toolchain (that's each domain's own CI job, see
+# .github/workflows/). Substantive rule content lives in tools/governance/;
+# this file only wires tools to git hooks.
+#
+# All tools here are installed via the repo's mise.toml.
+
+pre-commit:
+  parallel: true
+  commands:
+    editorconfig:
+      glob: '*'
+      run: ec {staged_files}
+
+    markdownlint:
+      glob: '*.md'
+      run: markdownlint-cli2 {staged_files}
+
+    vale:
+      glob: '*.md'
+      run: vale {staged_files}
+
+    gitleaks:
+      run: gitleaks protect --staged --redact --source .
+
+commit-msg:
+  commands:
+    conform:
+      run: conform enforce --commit-msg-file {1}
+
+pre-push:
+  commands:
+    gitleaks:
+      run: bash tools/governance/hooks/gitleaks-pre-push.sh
