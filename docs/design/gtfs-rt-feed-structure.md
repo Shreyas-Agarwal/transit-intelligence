@@ -15,11 +15,9 @@ This document captures the observed structure and field inventory of the Swiss G
 ## Running the Explorer
 
 ```bash
-cd apps/ingestion
-cp ../../.env.example .env  # fill in GTFS_RT_FEED_URL and GTFS_RT_API_TOKEN
-pnpm install
-pnpm build
-node dist/feed/explorer.js
+cd domains/ingestion
+cp ../../.env.example ../../.env  # fill in GTFS_RT_FEED_URL and GTFS_RT_API_TOKEN
+cargo run -p realtime -- explore
 ```
 
 The explorer writes `feed-exploration-output.json` in the working directory.
