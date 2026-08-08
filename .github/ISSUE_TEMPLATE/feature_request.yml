@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a new feature or improvement
+title: "feat: "
+labels: ["feature"]
+body:
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Domain
+      description: Which part of the repository would this change?
+      options:
+        - domains/ingestion (Rust)
+        - domains/gtfs_s (Python)
+        - A new domain
+        - Repository governance (CI, hooks, lint configs)
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What's the feature?
+      description: A clear description of what it is and what problem it solves.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Architectural impact
+      description: >-
+        New dependencies, cross-domain coupling, storage/schema changes, or
+        anything that might need an ADR (see the "Propose an ADR" template).
+    validations:
+      required: false

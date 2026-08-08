@@ -1,0 +1,47 @@
+name: Propose an ADR
+description: Propose an Architecture Decision Record for a durable, repo-wide decision
+title: "docs: ADR NNNN — "
+labels: ["adr"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for decisions with lasting consequences across the repository or a domain's architecture — the kind of thing `docs/adr/` exists to record (see the existing ADRs there for tone and structure, e.g. ADR 0013 for the most recent). Small, reversible, or single-domain implementation choices usually don't need one; a feature request or a note in the relevant domain is enough.
+
+  - type: input
+    id: title
+    attributes:
+      label: Proposed ADR title
+      placeholder: "Adopt X for Y"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What prompted this? What's the current state, and why is it insufficient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed decision
+    validations:
+      required: true
+
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Known consequences / trade-offs
+      description: Both pros and cons, to the extent you can see them yet.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

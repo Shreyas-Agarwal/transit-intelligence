@@ -18,7 +18,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero_sha" ] && continue # deleting a ref — nothing to scan
 
   if [ "$remote_sha" = "$zero_sha" ]; then
-    range="$local_sha"
+    # New branch/tag: no remote tip to diff against. Scan only commits not
+    # already reachable from an existing remote-tracking ref, instead of
+    # walking the entire history from $local_sha (which would rescan every
+    # commit already on main/other branches on every new-branch push).
+    range="$local_sha --not --remotes"
   else
     range="$remote_sha..$local_sha"
   fi
