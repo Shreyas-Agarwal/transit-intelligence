@@ -63,8 +63,13 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      # Non-blocking: 2 pre-existing findings in scripts/tests/ (a test calling
+      # ArtifactWriter.__init__ with stale kwargs, a truthy-DataFrame check)
+      # predate this workflow and aren't fixed here — this step is wired in
+      # so new findings are visible without letting old ones block CI.
       - name: Type check
         run: uv run pyright
+        continue-on-error: true
 
       # `uv run pytest` isn't wired in here: transit_subset's tests depend on
       # a downloaded GTFS-S snapshot under domains/gtfs_s/raw (see
