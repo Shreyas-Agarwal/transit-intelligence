@@ -1,5 +1,7 @@
 # Design Document: System Context & Boundaries
 
+> **Superseded.** This document described an early TypeScript-based prototype (`apps/gateway`, `apps/web`, `apps/api`, `apps/workers`) that was decommissioned without going into production use; those directories have been removed from the repository. `network-explorer` now lives as its own separate project outside this repository. See [ADR 0013](../adr/0013-adopt-polyglot-domain-driven-monorepo-architecture.md) for the current domain-first workspace organization and [`domains/`](../../domains/) for what's actually implemented today. Kept for historical reference.
+
 This document defines the functional boundaries, runtime contexts, and service responsibilities of the Transit Intelligence Platform.
 
 ## Service Boundaries

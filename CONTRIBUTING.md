@@ -4,23 +4,28 @@ Thank you for contributing to the Transit Intelligence Platform. To ensure a smo
 
 ## Monorepo Workflow
 
-We use a monorepo setup managed with **pnpm** and **Turborepo**.
+Per ADR 0013 (domain-first workspace organization), this is a polyglot monorepo organized around bounded contexts under `domains/`, not a single shared language workspace. Each domain is independently buildable, testable, and lintable using only the manifests inside it — there is no repository-wide install/build/test command.
 
 ### Setup Instructions
 
-1. Install dependencies:
-   ```bash
-   pnpm install
-   ```
-2. Verify formatting and linting:
-   ```bash
-   pnpm run format
-   pnpm run lint
-   ```
-3. Run the application locally:
-   ```bash
-   pnpm run dev
-   ```
+`cd` into the domain you're working on and use its own toolchain:
+
+- **`domains/ingestion`** (Rust, Cargo workspace):
+  ```bash
+  cd domains/ingestion
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets
+  cargo test --workspace
+  ```
+- **`domains/gtfs_s`** (Python, `uv`-managed):
+  ```bash
+  cd domains/gtfs_s
+  uv sync
+  uv run ruff check .
+  uv run pyright
+  ```
+
+`mise.toml` at the repository root pins the default toolchain versions (Rust, Python, etc.) used across domains.
 
 ## Branching Model
 
