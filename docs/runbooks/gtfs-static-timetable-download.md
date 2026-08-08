@@ -2,11 +2,13 @@
 
 ## Purpose
 
-The GTFS Static preprocessing pipeline (`domains/gtfs_s/scripts`, see [ADR 0011](../adr/0011-gtfs-static-preprocessing-and-zurich-subset-strategy.md)) requires a local copy of the nationwide Swiss GTFS-S ("Fahrplan") feed under `domains/gtfs_s/raw/`.
+Getting a fresh nationwide Swiss GTFS-S ("Fahrplan") snapshot onto disk, validated, and ready for
+the transform stage. This used to be a manual process; it's now automated by the `ckan` Rust
+crate. This runbook covers running that automation day-to-day: prerequisites, the `mise` tasks,
+configuration (including overriding the cutoff date on the fly), and where to look when something
+goes wrong.
 
-This feed is **not static despite the name** — opentransportdata.swiss republishes a new snapshot roughly twice a week. This runbook describes where the data comes from, how it is currently fetched by hand, and the `latest` symlink convention the pipeline relies on.
-
-For the plan to stop doing this by hand, see the design doc: [GTFS Static Auto-Downloader & Updater](../design/gtfs-static-auto-downloader.md).
+For the full design rationale, see [Design: GTFS Static Auto-Downloader & Updater](../design/gtfs-static-auto-downloader.md).
 
 ---
 
@@ -18,101 +20,167 @@ Dataset page:
 https://data.opentransportdata.swiss/dataset/timetable-2026-gtfs2020
 ```
 
-Key facts about this dataset (confirmed 2026-08-08):
+Key facts about this dataset:
 
 * Publisher: opentransportdata.swiss (Swiss national open transport data platform), backed by a CKAN catalog.
 * Update cadence: **twice per week** ("Zweimal pro Woche"), no updates on Swiss public holidays.
 * Each publish is a full nationwide GTFS-S snapshot, not a diff.
-* Resource (file) naming convention:
+* Resource (file) naming convention: `GTFS_FP2026_YYYYMMDD.zip`, e.g. `GTFS_FP2026_20260805.zip`. Older resources (pre ~2025-09) used a hyphenated date suffix (`GTFS_FP2026_2025-09-22.zip`) — the downloader normalizes both forms.
+* The downloader talks to the CKAN Action API (`api.opentransportdata.swiss/ckan-api`, `package_show`), not the HTML dataset page — resource ordering/markup on the page isn't a stable contract.
 
-  ```text
-  GTFS_FP2026_YYYYMMDD.zip
+---
+
+## Pipeline overview
+
+Two stages, two tools, run separately:
+
+1. **Extract** (`domains/ingestion/extract/ckan`, Rust) — detects new upstream versions, downloads
+   and archive-validates each one, converts every CSV member to Parquet, and publishes it to
+   `data/bronze/static/<version>/` with a `latest` symlink. See
+   [the design doc](../design/gtfs-static-auto-downloader.md) for the full state machine.
+2. **Transform** (`domains/ingestion/transform`, Python + Polars) — validates a Bronze snapshot's
+   Parquet tables (required columns, row-count sanity, referential integrity),
+   then derives the Zurich operational subset (ADR 0011) and publishes it to
+   `data/silver/static/<version>/`, with its own `latest` symlink.
+
+```text
+data/bronze/static/
+  20260729/
+    stops.parquet
+    trips.parquet
+    routes.parquet
+    stop_times.parquet
+    ...
+    .snapshot-meta.json
+  20260805/
+    ...
+  latest -> 20260805/
+  .manifest.json
+```
+
+No CSV ever lands here — the extractor converts to Parquet and deletes the CSVs before publishing
+a snapshot (design doc §6.5).
+
+---
+
+## Prerequisites
+
+* `mise` installed and trusted for this repo (`mise trust` if prompted) — it provisions `rust`, `uv`, and everything else via `mise.toml`.
+* A `.env` at the repo root (copy from `.env.example`) with, at minimum:
+
+  ```bash
+  GTFS_S_CKAN_DATASET_ID=timetable-2026-gtfs2020
+  GTFS_S_CKAN_API_TOKEN=...
+  GTFS_S_CKAN_API_TOKEN_HASH=...
   ```
 
-  e.g. `GTFS_FP2026_20260805.zip`. Older resources (pre ~2025-09) used a hyphenated date suffix (`GTFS_FP2026_2025-09-22.zip`) — treat both forms as valid when parsing dates.
-
-* Older snapshots roll off the live dataset page and are moved to `archive.opentransportdata.swiss`.
-* The dataset also exposes a CKAN `package_show` API (`/api/3/action/package_show?id=timetable-2026-gtfs2020`), which is the intended machine-readable way to enumerate resources instead of scraping the HTML page. Direct anonymous fetches to this endpoint have returned `403` from some clients (e.g. Claude's `WebFetch` tool) — this needs to be re-verified with a normal HTTP client/User-Agent before automation depends on it (see open questions in the design doc).
-
----
-
-## Where it lives locally
-
-```text
-domains/gtfs_s/
-  raw/          # gitignored — downloaded snapshots live here
-    gtfs_fp2026_20260805/
-      stops.txt
-      trips.txt
-      routes.txt
-      stop_times.txt
-      calendar_dates.txt
-      ...
-    gtfs_fp2026_20260729/
-      ...
-  processed/    # gitignored — pipeline output (Parquet artifacts)
-```
-
-`domains/gtfs_s/scripts/transit_subset/paths.py` currently discovers the timetable to process by globbing `raw/gtfs_fp*` and sorting descending:
-
-```python
-GTFS_DIR = sorted(
-    RAW_DIR.glob("gtfs_fp*"),
-    reverse=True
-)[0]
-```
-
-This works today because directory names sort lexicographically the same as chronologically (`gtfs_fp2026_20260805` > `gtfs_fp2026_20260729`), but it means **every consumer of the raw feed has to re-derive "which version is current"** by re-globbing and re-sorting. That is the problem the `latest` symlink (below) and the future auto-updater are meant to solve.
+  Obtain the token/hash pair from <https://opentransportdata.swiss/en/dev-api/> — same
+  opentransportdata.swiss application as `GTFS_RT_API_TOKEN`, but a distinct credential pair
+  scoped to the CKAN API.
 
 ---
 
-## `latest` symlink convention
+## Running the downloader
 
-Going forward, `domains/gtfs_s/raw/` should contain one directory per downloaded snapshot, named after the extracted zip (lowercased, e.g. `gtfs_fp2026_20260805/`), plus a symlink:
-
-```text
-domains/gtfs_s/raw/latest -> gtfs_fp2026_20260805/
+```bash
+mise run ingestion:gtfs-static
 ```
 
-Consumers (the subset builder, notebooks, ad-hoc analysis) should read from `domains/gtfs_s/raw/latest/` instead of globbing. This gives us one indirection point to repoint whenever a new snapshot is downloaded, and makes "what version are we running against" a `readlink` away instead of a glob-and-sort.
+This runs `cargo run --release -p ckan` from `domains/ingestion/extract` (see `mise.toml`). It's
+safe to re-run on a schedule or by hand — idempotent, self-healing after a crash (design doc §12).
 
-> `paths.py` has not been switched over to the symlink yet — it still globs. Updating it is in scope for the auto-downloader work (see design doc), so both mechanisms should keep agreeing (i.e. `latest` should always point at the same directory the glob would resolve to) until the cutover happens.
+On success, check:
+
+```bash
+readlink data/bronze/static/latest
+cat data/bronze/static/.manifest.json
+```
 
 ---
 
-## Manual download procedure (current, pre-automation)
+## Configuration
 
-Until the auto-downloader exists, fetch a new snapshot by hand when the pipeline needs fresher data:
+All variables below are read from the environment (`.env` is loaded automatically); the full
+annotated list lives in `.env.example`. The ones you're most likely to touch day-to-day:
 
-1. Open the dataset page and find the most recent resource:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GTFS_S_CUTOFF_VERSION` | `20260101` | Ignore upstream versions older than this (`YYYYMMDD`), as if never published. Empty string disables the cutoff entirely. |
+| `GTFS_S_RAW_DIR` | `<repo_root>/data/bronze/static` | Where snapshots are written. Override to point at a different disk/location (e.g. for a test run). |
+| `GTFS_S_CKAN_API_URL` | `https://api.opentransportdata.swiss/ckan-api` | CKAN Action API base URL. |
+| `GTFS_S_DOWNLOAD_REQUEST_TIMEOUT_SECS` | `1800` | Per-download timeout — archives are hundreds of MB. |
 
-   ```text
-   https://data.opentransportdata.swiss/dataset/timetable-2026-gtfs2020
-   ```
+### Setting the cutoff date on the fly
 
-2. Download the zip (e.g. `GTFS_FP2026_20260805.zip`).
+`GTFS_S_CUTOFF_VERSION` is read fresh from the environment on every run — there's no need to edit
+`.env` for a one-off. Export it inline for a single invocation:
 
-3. Extract it into a new, lowercased, date-suffixed directory under `domains/gtfs_s/raw/`:
+```bash
+GTFS_S_CUTOFF_VERSION=20260801 mise run ingestion:gtfs-static
+```
 
-   ```bash
-   mkdir -p domains/gtfs_s/raw/gtfs_fp2026_20260805
-   unzip GTFS_FP2026_20260805.zip -d domains/gtfs_s/raw/gtfs_fp2026_20260805
-   ```
+This tells the downloader to ignore every upstream version published before 2026-08-01, so a first
+run doesn't backfill the entire CKAN catalog's history. To make a new cutoff stick across future
+runs (not just this one invocation), update `GTFS_S_CUTOFF_VERSION` in `.env` instead.
 
-4. Repoint the `latest` symlink at the new directory (atomically, so nothing reading through `latest` ever sees a half-updated target):
+Two things worth knowing about how the cutoff interacts with what's already on disk:
 
-   ```bash
-   cd domains/gtfs_s/raw
-   ln -sfn gtfs_fp2026_20260805 latest
-   ```
+* The cutoff only affects **discovery** — it never deletes or retroactively rejects a snapshot
+  that's already installed under `data/bronze/static/`.
+* Raising the cutoff after some older snapshots are already installed doesn't remove them; it just
+  stops the downloader from reaching further back on future runs. If you want a clean slate at the
+  new cutoff, remove the old snapshot directories (and rebuild `.manifest.json`, which regenerates
+  automatically from the remaining sidecars on the next run) yourself first.
 
-5. Re-run the subset pipeline (`domains/gtfs_s/scripts`, see its [README](../../domains/gtfs_s/scripts/README.md)) so `processed/` reflects the new snapshot.
+---
 
-6. Old snapshot directories can be left in place for now (disk permitting) — retention policy is an open question for the design doc, not this runbook.
+## Running the transform (validate + subset) stage
+
+Once at least one Bronze snapshot is on disk, validate it and derive the Zurich Silver subset
+(ADR 0011) via the `mise` task:
+
+```bash
+mise run ingestion:transform           # mode defaults to `latest` — the `latest` Bronze snapshot only
+mise run ingestion:transform latest    # same, explicit
+mise run ingestion:transform replay    # every retained Bronze snapshot, oldest first
+```
+
+This runs `uv run python -m ingestion.transform <mode>` from `domains/ingestion/transform` (see
+`mise.toml`). Equivalent without `mise`:
+
+```bash
+cd domains/ingestion/transform
+uv sync
+uv run python -m ingestion.transform latest
+uv run python -m ingestion.transform replay
+```
+
+For each snapshot processed: Bronze's Parquet tables are validated (missing column, out-of-range
+row count, orphaned foreign key, out-of-bounds coordinate — logged per failing check); a snapshot
+that fails validation gets **no** Silver output. A snapshot that passes gets the Zurich
+subset/derived tables written to `data/silver/static/<version>/`, with `data/silver/static/latest`
+advanced to match — same directory-per-version + `latest`-symlink convention as Bronze. Exit code
+is non-zero if any processed snapshot failed validation.
+
+See `domains/ingestion/transform/README.md` for the full artifact list and the Python API
+equivalent (`from ingestion import transform; transform.run(mode=...)`).
+
+---
+
+## Troubleshooting
+
+* **`latest` symlink and `.manifest.json` disagree** — the downloader asserts this on every run
+  and refuses to guess which side is right (design doc §12); it's a bug, not a state to work
+  around by hand. File an issue rather than manually repointing the symlink.
+* **A version keeps failing** — check `data/bronze/static/.manifest.json` for its recorded status;
+  a `failed` version never gets a directory of its own (design doc §4), so it's always safe to
+  just re-run the downloader once the underlying issue (usually a transient network error) clears.
+* **Stale lock file** (`data/bronze/static/.updater.lock`) after a crash — self-heals on the next
+  run (design doc §11); no manual cleanup needed.
 
 ---
 
 ## Related documents
 
-* [ADR 0011 — GTFS Static Preprocessing and Zurich Operational Subset Strategy](../adr/0011-gtfs-static-preprocessing-and-zurich-subset-strategy.md) — lists "Static Feed Automation" as future work; this runbook and the design doc below are that follow-through.
-* [Design: GTFS Static Auto-Downloader & Updater](../design/gtfs-static-auto-downloader.md) — the plan for replacing the manual steps above with a script.
+* [ADR 0011 — GTFS Static Preprocessing and Zurich Operational Subset Strategy](../adr/0011-gtfs-static-preprocessing-and-zurich-subset-strategy.md) — the row-count/subset figures the transform stage's validation checks are bounded against.
+* [Design: GTFS Static Auto-Downloader & Updater](../design/gtfs-static-auto-downloader.md) — full design and rationale for the extract stage.

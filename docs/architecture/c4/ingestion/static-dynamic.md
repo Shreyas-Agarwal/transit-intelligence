@@ -15,6 +15,7 @@ sequenceDiagram
     participant CkanClient
     participant Download
     participant Archive
+    participant ParquetConvert
     participant Raw as Raw Snapshot Store
 
     Scheduler->>CLI: invoke
@@ -57,8 +58,16 @@ sequenceDiagram
         alt validation failed
             Pipeline->>Raw: delete staging artifacts, record failed (in-memory, this run only)
         else validation passed
-            Pipeline->>Raw: atomic rename staging → raw/<version>/
-            Pipeline->>Raw: write .snapshot-meta.json sidecar
+            Pipeline->>ParquetConvert: convert_directory(csv_staging, parquet_staging)
+            ParquetConvert->>ParquetConvert: for every *.txt: read as all-Utf8, write *.parquet (zstd)
+            ParquetConvert-->>Pipeline: ok / error
+            alt conversion failed
+                Pipeline->>Raw: delete CSV + parquet staging artifacts, record failed (in-memory, this run only)
+            else conversion succeeded
+                Pipeline->>Raw: delete CSV staging (scratch, no longer needed)
+                Pipeline->>Raw: atomic rename parquet staging → raw/<version>/
+                Pipeline->>Raw: write .snapshot-meta.json sidecar
+            end
         end
     end
 

@@ -31,3 +31,9 @@ run = "cargo run --release -p realtime -- run"
 description = "One-shot GTFS-RT feed exploration — fetch, decode, and summarise the feed's contents (docs/design/gtfs-rt-feed-structure.md)"
 dir = "domains/ingestion/extract"
 run = "cargo run -p realtime -- explore"
+
+[tasks."ingestion:transform"]
+description = "Run the GTFS-S transform stage: validate a Bronze snapshot and derive the Zurich Silver subset. Mode defaults to 'latest' (just the latest Bronze snapshot); pass 'replay' to reprocess every retained snapshot: mise run ingestion:transform replay"
+dir = "domains/ingestion/transform"
+usage = "arg \"mode\" default=\"latest\""
+run = "uv run python -m ingestion.transform \"${usage_mode}\""
