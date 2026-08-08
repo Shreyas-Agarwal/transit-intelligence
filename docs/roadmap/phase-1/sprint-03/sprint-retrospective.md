@@ -17,7 +17,7 @@ The objective was to determine whether browser-local analytics could support Zur
 
 ---
 
-# What Actually Happened
+## What Actually Happened
 
 The architectural hypothesis was validated much earlier than anticipated.
 
@@ -39,7 +39,7 @@ The sprint remained within its planned time budget and was completed ahead of sc
 
 ---
 
-# Most Important Discovery
+## Most Important Discovery
 
 The most important discovery was not performance.
 
@@ -65,7 +65,7 @@ This significantly expanded the perceived capabilities of the Edge-First archite
 
 ---
 
-# Unexpected Outcome
+## Unexpected Outcome
 
 Sprint 03 unintentionally produced a second product concept.
 
@@ -91,7 +91,7 @@ The resulting prototype demonstrated that the same architecture supporting Trans
 
 ---
 
-# Data Quality Findings
+## Data Quality Findings
 
 The analytical workbench surfaced issues that were not obvious during earlier EDA and subsetting work.
 
@@ -114,9 +114,9 @@ Future phases should incorporate analytical visualization earlier in the workflo
 
 ---
 
-# What Went Well
+## What Went Well
 
-## Architectural Validation
+### Architectural Validation
 
 The primary sprint objective was achieved.
 
@@ -126,7 +126,7 @@ The central hypothesis behind ADR 0012 was validated with benchmark evidence rat
 
 ---
 
-## Browser Performance
+### Browser Performance
 
 Performance exceeded expectations.
 
@@ -138,7 +138,7 @@ This significantly reduced the need for backend analytical infrastructure during
 
 ---
 
-## Semantic Layer Experimentation
+### Semantic Layer Experimentation
 
 The semantic layer evolved further than anticipated.
 
@@ -148,7 +148,7 @@ This provided stronger evidence than originally required for the sprint.
 
 ---
 
-## Product Discovery
+### Product Discovery
 
 Several hours of exploratory implementation revealed opportunities beyond the original sprint scope.
 
@@ -160,9 +160,9 @@ The sprint was still completed ahead of schedule.
 
 ---
 
-# What Did Not Go Well
+## What Did Not Go Well
 
-## Analytical Data Modeling Assumptions
+### Analytical Data Modeling Assumptions
 
 Sprint 02 primarily optimized for geographic correctness and dataset generation.
 
@@ -181,7 +181,7 @@ These issues were not blockers for the sprint but became visible through analyti
 
 ---
 
-## Product Readiness Gap
+### Product Readiness Gap
 
 The Analytics Studio prototype demonstrated technical viability but also highlighted the gap between architectural validation and product readiness.
 
@@ -197,9 +197,9 @@ As a result, Analytics Studio should currently be viewed as a validated prototyp
 
 ---
 
-# Lessons Learned
+## Lessons Learned
 
-## Validate First, Expand Later
+### Validate First, Expand Later
 
 The original dashboard was sufficient to validate the architecture.
 
@@ -209,7 +209,7 @@ This approach reduced risk and prevented premature optimization.
 
 ---
 
-## Visualization Accelerates Understanding
+### Visualization Accelerates Understanding
 
 Interactive exploration surfaced data quality and semantic issues more effectively than notebook-based analysis.
 
@@ -217,7 +217,7 @@ Future work should leverage visualization earlier in the analytical process.
 
 ---
 
-## Browser Execution Is Stronger Than Expected
+### Browser Execution Is Stronger Than Expected
 
 The assumption that a backend semantic layer would eventually become necessary was not supported by the results.
 
@@ -227,7 +227,7 @@ This significantly simplified the Phase 1 architecture.
 
 ---
 
-## Architecture Can Create Products
+### Architecture Can Create Products
 
 Analytics Studio was not designed upfront.
 
@@ -239,7 +239,7 @@ The product idea emerged from solving real problems rather than searching for a 
 
 ---
 
-# Follow-Up Actions
+## Follow-Up Actions
 
 Sprint 04 returns focus to the primary Transit Intelligence roadmap.
 
@@ -257,7 +257,7 @@ Future investment should occur only when it directly supports Transit Intelligen
 
 ---
 
-# Final Assessment
+## Final Assessment
 
 Sprint 03 exceeded its original objectives.
 

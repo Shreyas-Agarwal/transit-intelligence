@@ -1,0 +1,24 @@
+{
+  // Base ruleset for markdownlint-cli2 (root .markdownlint-cli2.jsonc extends
+  // this). Nearly every rule is left at its default — deviations below are
+  // genuine, deliberate style choices, not a workaround for the existing
+  // docs' violations (those were fixed instead; see git history for the
+  // ADR 0011/0012 heading-level and README.md table-style fixes this
+  // ruleset's introduction required).
+  "default": true,
+
+  // Long, single-line paragraphs are the deliberate house style across
+  // README.md, docs/adr/, and docs/design/ (keeps diffs to one line per
+  // sentence). Enforcing an 80-column wrap would flag nearly every existing
+  // paragraph.
+  "MD013": false,
+
+  // Structured recurring reports (docs/roadmap/**/sprint-spec.md,
+  // closure-report.md) legitimately reuse headings like "Status" and
+  // "Achievements" once per section. `siblings_only` only flags a duplicate
+  // against headings sharing the same parent, so real accidental duplicates
+  // (two "## Status" under the same H1) still get caught. (This is the one
+  // rule tuned rather than fixed-then-left-default: the repeated headings are
+  // a genuine, deliberate structural pattern, not a defect.)
+  "MD024": { "siblings_only": true }
+}

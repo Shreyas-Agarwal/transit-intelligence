@@ -2,7 +2,7 @@
 
 ## Status
 
-**Recommendation: Option B — Raw Feed → Redpanda → Downstream Filtering**
+**Recommendation:** Option B — Raw Feed → Redpanda → Downstream Filtering
 
 ---
 
@@ -18,7 +18,7 @@ This document evaluates both options and provides a formal recommendation.
 
 ### Option A — Pre-Ingest Filtering
 
-```
+```text
 Raw Feed (HTTP) → Zone Filter → Redpanda (only Zone 110 entities)
 ```
 
@@ -26,7 +26,7 @@ The ingestion worker applies a zone predicate before publishing. Only entities a
 
 ### Option B — Post-Ingest Filtering
 
-```
+```text
 Raw Feed (HTTP) → Redpanda (all entities) → Zone Filter Consumer
 ```
 

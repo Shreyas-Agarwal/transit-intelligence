@@ -1,0 +1,6 @@
+# Thin root entrypoint (gitleaks discovers config at the invocation root by
+# default). Rules/allowlist live in tools/governance/gitleaks/rules.toml.
+title = "transit-intelligence gitleaks config"
+
+[extend]
+path = "tools/governance/gitleaks/rules.toml"

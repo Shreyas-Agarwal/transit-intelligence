@@ -77,7 +77,7 @@ Root does **not** hold `Cargo.toml`, `pyproject.toml`, `package.json`, or any lo
 
 Illustrative shape:
 
-```
+```text
 /
   mise.toml
   docs/architecture/adr/

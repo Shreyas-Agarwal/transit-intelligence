@@ -1,0 +1,40 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+
+  // Per ADR 0013, no ecosystem owns the repository — Renovate must not
+  // either. A single package manager's updates across the whole repo would
+  // recreate exactly the centralized-dependency-graph problem ADR 0013
+  // rejects, even though the manifests themselves stay decentralized.
+  //
+  // Rather than one packageRule per known domain (which would need editing
+  // every time a domain is added, exactly what ADR 0013 argues against),
+  // this groups every dependency update by the directory containing its
+  // manifest ({{packageFileDir}}) — domains/ingestion's Cargo.toml,
+  // domains/gtfs_s's pyproject.toml, a future platform/ or web/ package,
+  // whatever gets added later. Each directory gets its own independent PR
+  // stream; nothing here needs to know the current domain list.
+  packageRules: [
+    {
+      matchFileNames: ["**"],
+      groupName: "{{packageFileDir}}",
+    },
+  ],
+
+  // Rust workspace: Cargo.lock is entirely derived from domains/ingestion's
+  // Cargo.toml, so lockfile-only maintenance PRs are still scoped by the
+  // same rule above via packageFileDir.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 6am on monday"],
+  },
+
+  ignorePaths: [
+    "**/target/**",
+    "**/.venv/**",
+    "**/node_modules/**",
+    // Vendored by `vale sync`, not a dependency manifest Renovate should
+    // manage — see .vale.ini.
+    "tools/governance/vale/styles/**",
+  ],
+}

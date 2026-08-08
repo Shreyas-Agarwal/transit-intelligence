@@ -1,0 +1,9 @@
+{
+  // Overrides the root config for this directory only. Issue/PR templates
+  // conventionally start with a heading like "## Description" — GitHub
+  // supplies the document title itself, so MD041 (first line must be an H1)
+  // doesn't apply here the way it does to every other doc in the repo.
+  "config": {
+    "MD041": false
+  }
+}

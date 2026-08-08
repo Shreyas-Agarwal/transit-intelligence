@@ -30,7 +30,7 @@ The platform must decide:
 
 Per ADR 0008, Sprint 02 publishes **all entity types** to a single topic:
 
-```
+```text
 transit.snapshots.raw
 ```
 

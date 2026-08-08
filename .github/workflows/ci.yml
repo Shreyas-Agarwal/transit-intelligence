@@ -1,8 +1,16 @@
 name: Continuous Integration
 
 # Per ADR 0013 (domain-first workspace organization), CI orchestrates domains
-# rather than owning a shared build — each job cd's into its domain and uses
-# only the manifests contained within it.
+# rather than owning a shared build. This workflow never names a domain or
+# its language: it lists domains/*/ directories at run time and runs `make
+# ci` in each — a convention every domain is expected to provide (see
+# domains/ingestion/Makefile, domains/gtfs_s/Makefile). Adding a domain never
+# requires editing this file.
+#
+# Toolchains for every domain (Rust, Python/uv, ...) come from the repo-root
+# mise.toml via jdx/mise-action, installed once per job — the job doesn't
+# know or care which of those toolchains the domain it's building actually
+# uses.
 
 on:
   push:
@@ -10,67 +18,39 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  ingestion-rust:
-    name: domains/ingestion (Rust)
+  discover:
+    name: Discover domains
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: domains/ingestion
-
+    outputs:
+      domains: ${{ steps.list.outputs.domains }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: List domains/*/ directories
+        id: list
+        run: |
+          domains=$(find domains -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | jq -R -s -c 'split("\n")[:-1]')
+          echo "domains=$domains" >> "$GITHUB_OUTPUT"
 
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: domains/ingestion
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint
-        run: cargo clippy --workspace --all-targets
-
-      - name: Test
-        run: cargo test --workspace
-
-  gtfs-s-python:
-    name: domains/gtfs_s (Python)
+  domain-ci:
+    name: domains/${{ matrix.domain }}
+    needs: discover
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: domains/gtfs_s
-
+    strategy:
+      fail-fast: false
+      matrix:
+        domain: ${{ fromJson(needs.discover.outputs.domains) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          working-directory: domains/gtfs_s
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
 
-      - name: Install dependencies
-        run: uv sync --all-extras
-
-      - name: Lint
-        run: uv run ruff check .
-
-      # Non-blocking: 2 pre-existing findings in scripts/tests/ (a test calling
-      # ArtifactWriter.__init__ with stale kwargs, a truthy-DataFrame check)
-      # predate this workflow and aren't fixed here — this step is wired in
-      # so new findings are visible without letting old ones block CI.
-      - name: Type check
-        run: uv run pyright
-        continue-on-error: true
-
-      # `uv run pytest` isn't wired in here: transit_subset's tests depend on
-      # a downloaded GTFS-S snapshot under domains/gtfs_s/raw (see
-      # scripts/README.md), which CI has no step to fetch yet.
+      - name: make ci
+        run: make -C "domains/${{ matrix.domain }}" ci

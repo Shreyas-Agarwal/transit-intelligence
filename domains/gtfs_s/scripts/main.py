@@ -67,7 +67,7 @@ def main() -> None:
     writer.write(frequencies, ArtifactNames.FREQUENCIES)
 
     writer.write_manifest()
-    
+
     summary_stats = {
         "stops": stops.height,
         "trips": trips.height,
@@ -95,24 +95,24 @@ def main() -> None:
     print(f"  - Internal: {internal_routes.height:,}")
     print(f"  - Crossing: {crossing_routes.height:,}")
     print(f"  - Mixed: {mixed_routes.height:,}\n")
-    
+
     print("Stop Times:")
     print(f"  {stop_times.height:,}")
     print(f"  - Internal: {internal_stop_times.height:,}")
     print(f"  - Crossing: {crossing_stop_times.height:,}\n")
-    
+
     print("Calendar:")
     print(f"  {calendar.height:,}\n")
-    
+
     print("Calendar Dates:")
     print(f"  {calendar_dates.height:,}\n")
-    
+
     print("Agencies:")
     print(f"  {agencies.height:,}\n")
-    
+
     print("Frequencies:")
     print(f"  {frequencies.height:,}\n")
-    
+
     print("Artifacts Written:")
     print(f"  {writer.written_count}\n")
     print("Manifest:")

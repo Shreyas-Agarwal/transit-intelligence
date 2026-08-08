@@ -61,7 +61,7 @@ This separation is what makes the system replayable: any historical state can be
 ### Modules
 
 | Module | Responsibility |
-|---|---|
+| --- | --- |
 | `ingestion` | Consumes and normalizes GTFS / GTFS-RT protobuf streams |
 | `transit_state` | Maintains static timetables and live vehicle positions |
 | `graph_engine` | Maintains the temporal transit graph; serves pathfinding and propagation queries |
@@ -82,7 +82,7 @@ A full architectural breakdown, including data flow diagrams and module boundari
 ## Technology Stack
 
 | Layer | Technology |
-|---|---|
+| --- | --- |
 | Event Streaming | Redpanda |
 | Service Communication | gRPC / Protobuf |
 | Operational Store | PostgreSQL |
@@ -139,7 +139,7 @@ An earlier TypeScript-based prototype (`apps/*`, shared `packages/*`) explored a
 Transit Intelligence is pre-1.0. The sections above describe the target architecture; the table below reflects what is actually implemented today.
 
 | Component | Status |
-|---|---|
+| --- | --- |
 | Ingestion service (GTFS / GTFS-RT) | Working |
 | Static dataset analysis | Complete |
 | Static dataset → temporal graph conversion | In progress |

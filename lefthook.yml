@@ -1,0 +1,43 @@
+# Repository governance — commit-time checks. Per ADR 0013, these operate on
+# file patterns and staged diffs only; they never invoke a domain's own
+# build/lint/test toolchain (that's each domain's own CI job, see
+# .github/workflows/). Substantive rule content lives in tools/governance/;
+# this file only wires tools to git hooks.
+#
+# All tools here are installed via the repo's mise.toml.
+
+pre-commit:
+  parallel: true
+  commands:
+    editorconfig:
+      glob: '*'
+      run: ec {staged_files}
+
+    markdownlint:
+      glob: '*.md'
+      # --no-globs: lint exactly the staged files (still applying
+      # .markdownlint-cli2.jsonc's rules/ignores) instead of cli2's default
+      # of adding its own configured globs (**/*.md) on top of the file
+      # list, which would re-lint the whole repo on every commit.
+      run: markdownlint-cli2 --no-globs {staged_files}
+
+    vale:
+      glob: '*.md'
+      run: vale {staged_files}
+
+    gitleaks:
+      run: gitleaks protect --staged --redact --source .
+
+commit-msg:
+  commands:
+    conform:
+      run: conform enforce --commit-msg-file {1}
+
+pre-push:
+  commands:
+    gitleaks:
+      # use_stdin: lefthook doesn't forward git's stdin (the pushed ref
+      # list) to commands by default. Without it, the script's `while read`
+      # loop blocks forever waiting on input that never arrives.
+      use_stdin: true
+      run: bash tools/governance/hooks/gitleaks-pre-push.sh

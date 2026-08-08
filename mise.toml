@@ -3,6 +3,20 @@ python = "latest"
 rust = "latest"
 uv = "latest"
 
+# --- Repository governance tooling ---
+lefthook = "2.1.10"
+editorconfig-checker = "3.8.0"
+conform = "0.1.0-alpha.31"
+gitleaks = "8.30.1"
+vale = "3.17.1"
+actionlint = "1.7.12"
+# markdownlint-cli2 is the one governance tool without a standalone binary —
+# it's an npm package, which is why `node` reappears below. This is a single
+# pinned CLI installed via mise's npm backend, not a TypeScript workspace: no
+# package.json, no lockfile, nothing for any domain to depend on.
+node = "24"
+"npm:markdownlint-cli2" = "0.23.2"
+
 [tasks."ingestion:gtfs-static"]
 description = "Run the GTFS-S static downloader: detect, download, verify, and publish new snapshots (docs/design/gtfs-static-auto-downloader.md)"
 dir = "domains/ingestion"

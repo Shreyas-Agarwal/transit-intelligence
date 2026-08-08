@@ -10,7 +10,7 @@ Accepted
 
 ---
 
-# Context
+## Context
 
 The Transit Intelligence Platform consumes Swiss GTFS-Realtime (GTFS-RT) feeds as its primary operational data source.
 
@@ -41,7 +41,7 @@ A preprocessing strategy is therefore required to derive a Zurich-focused subset
 
 ---
 
-# Decision
+## Decision
 
 A dedicated GTFS Static Processing Layer will be introduced.
 
@@ -57,7 +57,7 @@ The preprocessing pipeline is implemented as an independent subsystem and is exe
 
 ---
 
-# Zurich Subset Definition
+## Zurich Subset Definition
 
 The initial Zurich subset is derived using stop-name based filtering.
 
@@ -102,7 +102,7 @@ without affecting downstream consumers.
 
 ---
 
-# Trip Universe Derivation
+## Trip Universe Derivation
 
 Trips are derived from stop_times.
 
@@ -127,7 +127,7 @@ This produces approximately:
 
 ---
 
-# Route Universe Derivation
+## Route Universe Derivation
 
 Routes are derived from Zurich trips.
 
@@ -151,11 +151,11 @@ This produces approximately:
 
 ---
 
-# Trip Classification
+## Trip Classification
 
 Trips are further classified into operational categories.
 
-## Internal Trip
+### Internal Trip
 
 A trip is classified as Internal when:
 
@@ -169,7 +169,7 @@ Formally:
 total_stops == zurich_stops
 ```
 
-## Crossing Trip
+### Crossing Trip
 
 A trip is classified as Crossing when:
 
@@ -192,19 +192,19 @@ Observed distribution:
 
 ---
 
-# Route Classification
+## Route Classification
 
 Routes are classified based on the classifications of their associated trips.
 
-## Internal Route
+### Internal Route
 
 All trips are Internal.
 
-## Crossing Route
+### Crossing Route
 
 All trips are Crossing.
 
-## Mixed Route
+### Mixed Route
 
 The route contains both Internal and Crossing trips.
 
@@ -220,7 +220,7 @@ The Mixed classification is retained because it reflects operational reality for
 
 ---
 
-# Artifact Strategy
+## Artifact Strategy
 
 The preprocessing layer generates reusable Parquet artifacts.
 
@@ -257,7 +257,7 @@ All artifacts are immutable outputs of the preprocessing pipeline.
 
 ---
 
-# Storage Format Decision
+## Storage Format Decision
 
 Parquet is selected as the canonical artifact format.
 
@@ -276,7 +276,7 @@ Generated artifacts must be persisted as Parquet.
 
 ---
 
-# Processing Technology Decision
+## Processing Technology Decision
 
 Polars is selected as the processing engine.
 
@@ -307,9 +307,9 @@ to_list() on large datasets
 
 ---
 
-# Consequences
+## Consequences
 
-## Positive
+### Positive
 
 * Reduces network size before realtime processing.
 * Creates reproducible static artifacts.
@@ -317,7 +317,7 @@ to_list() on large datasets
 * Supports future DuckDB and Arrow workflows.
 * Provides a clear separation between static and realtime processing.
 
-## Negative
+### Negative
 
 * Zurich boundaries are heuristic rather than geographic.
 * Static artifacts require periodic regeneration.
@@ -325,17 +325,17 @@ to_list() on large datasets
 
 ---
 
-# Future Work
+## Future Work
 
-## Static Feed Automation
+### Static Feed Automation
 
 Implement scheduled GTFS-S refresh workflows.
 
-## Geographic Boundaries
+### Geographic Boundaries
 
 Evaluate replacement of stop-name filtering with GIS-based definitions.
 
-## Semantic Layer
+### Semantic Layer
 
 Construct higher-order network entities:
 
@@ -344,11 +344,11 @@ Construct higher-order network entities:
 * Transfer networks
 * Service frequency models
 
-## Realtime Enrichment
+### Realtime Enrichment
 
 Join GTFS-RT events against generated static artifacts.
 
-## Visualization
+### Visualization
 
 Expose static artifacts through:
 

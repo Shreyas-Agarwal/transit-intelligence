@@ -26,6 +26,10 @@ Describe the tests run to verify your changes. Provide instructions so we can re
 - [ ] Integration tests
 - [ ] Manual verification tests
 
+## Scope
+
+- [ ] This PR touches only one domain's manifests (`domains/<name>/`), or touches multiple deliberately (e.g. a repo-wide governance/tooling change) — not by accident. Per ADR 0013, most changes should stay within one domain.
+
 ## Follow-up work
 
 What related or downstream tasks need to be completed?

@@ -1,0 +1,20 @@
+{
+  // Thin root entrypoint (tool auto-discovery requires this file at root).
+  // Rule content lives in tools/governance/markdownlint/rules.jsonc.
+  "config": {
+    "extends": "tools/governance/markdownlint/rules.jsonc"
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "**/target/**",
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/node_modules/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/.pytest_cache/**",
+    "**/data/**",
+    // Vendored by `vale sync`, not hand-authored — see .vale.ini.
+    "tools/governance/vale/styles/**"
+  ]
+}

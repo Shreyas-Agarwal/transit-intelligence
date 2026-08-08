@@ -23,7 +23,7 @@ Sprint 02 introduces the minimal Phase 1 topic topology. Additional topics will 
 
 ### `transit.snapshots.raw`
 
-```
+```text
 Partitions:     1
 Replication:    1 (single-node local dev)
 Retention:      7 days (604800000 ms)
@@ -38,7 +38,7 @@ Cleanup policy: delete
 
 ### `transit.snapshots.normalized`
 
-```
+```text
 Partitions:     1
 Replication:    1
 Retention:      7 days
@@ -51,7 +51,7 @@ _Not yet populated. Reserved for future normalisation consumers._
 
 ### `transit.state.deltas`
 
-```
+```text
 Partitions:     1
 Replication:    1
 Retention:      7 days
@@ -64,7 +64,7 @@ _Not yet populated. Reserved for future delta computation consumers._
 
 ### `transit.metrics.operational`
 
-```
+```text
 Partitions:     1
 Replication:    1
 Retention:      30 days (2592000000 ms)
@@ -81,7 +81,7 @@ All messages in `transit.snapshots.raw` are UTF-8 encoded JSON strings (`Snapsho
 
 ### Message Key
 
-```
+```text
 vehicle.{vehicle_id}   → VehiclePosition entities
 trip.{trip_id}         → TripUpdate entities
 alert.{sha256[0:12]}   → Alert entities
