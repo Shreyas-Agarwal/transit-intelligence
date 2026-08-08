@@ -11,3 +11,4 @@ pub mod decoder;
 pub mod fetcher;
 pub mod model;
 pub mod proto;
+pub mod topics;
