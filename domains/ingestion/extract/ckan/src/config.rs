@@ -76,14 +76,15 @@ impl CkanConfig {
     }
 }
 
-/// `CARGO_MANIFEST_DIR` for this crate is `<repo_root>/domains/ingestion/ckan`;
-/// three ancestors up is `<repo_root>`. This is a compile-time constant, so the
-/// result is independent of the process's working directory at runtime.
+/// `CARGO_MANIFEST_DIR` for this crate is
+/// `<repo_root>/domains/ingestion/extract/ckan`; four ancestors up is
+/// `<repo_root>`. This is a compile-time constant, so the result is
+/// independent of the process's working directory at runtime.
 fn default_raw_dir() -> PathBuf {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .nth(3)
-        .expect("CARGO_MANIFEST_DIR is domains/ingestion/ckan under the repo root");
+        .nth(4)
+        .expect("CARGO_MANIFEST_DIR is domains/ingestion/extract/ckan under the repo root");
     repo_root.join("data/bronze/static")
 }
 
@@ -106,9 +107,9 @@ mod tests {
 
     #[test]
     fn default_raw_dir_resolves_to_repo_root_data_bronze_static() {
-        // CARGO_MANIFEST_DIR is domains/ingestion/ckan; the repo root is the
-        // directory containing `domains/`. This must hold regardless of the
-        // test runner's own working directory.
+        // CARGO_MANIFEST_DIR is domains/ingestion/extract/ckan; the repo root
+        // is the directory containing `domains/`. This must hold regardless
+        // of the test runner's own working directory.
         let dir = default_raw_dir();
         assert!(dir.ends_with("data/bronze/static"), "{}", dir.display());
         assert!(
