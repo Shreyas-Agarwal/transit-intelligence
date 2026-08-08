@@ -1,8 +1,7 @@
 [project]
-name = "transit-intelligence"
+name = "gtfs-s"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "GTFS Static subset pipeline (domains/gtfs_s)"
 requires-python = ">=3.14"
 dependencies = [
     "duckdb>=1.5.4",
