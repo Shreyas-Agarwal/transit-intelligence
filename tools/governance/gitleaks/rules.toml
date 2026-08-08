@@ -1,0 +1,24 @@
+# Extends gitleaks' built-in default rule set (secret detectors for common
+# providers + generic high-entropy patterns) rather than replacing it.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Repo-wide false-positive exclusions"
+paths = [
+  '''\.venv/''',
+  '''target/''',
+  '''__pycache__/''',
+  '''node_modules/''',
+  '''tools/governance/vale/styles/''', # vendored by `vale sync`
+  '''Cargo\.lock''',
+  '''uv\.lock''',
+]
+
+# .env.example's placeholder values (obviously not real credentials, but
+# shaped like the tokens the real .env file would hold).
+regexes = [
+  '''your-api-token-here''',
+  '''your-ckan-api-token-here''',
+  '''your-ckan-api-token-hash-here''',
+]
