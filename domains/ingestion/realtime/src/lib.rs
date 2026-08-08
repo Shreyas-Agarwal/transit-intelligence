@@ -6,4 +6,5 @@
 //! Split into a library + thin binary (`main.rs`) so the pipeline stages are
 //! independently testable without a live feed endpoint or Redpanda broker.
 
+pub mod config;
 pub mod proto;
