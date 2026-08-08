@@ -1,5 +1,8 @@
 name: Governance
 
+permissions:
+  contents: read
+
 # Checks that apply repo-wide regardless of which domain(s) a PR touches:
 # commit-message policy, docs prose/structure, and workflow-file lint. None
 # of this is a domain's build/lint/test (see ci.yml for that).
