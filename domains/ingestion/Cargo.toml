@@ -3,7 +3,7 @@ resolver = "2"
 
 members = ["common", "ckan", "realtime", "service-alerts"]
 
-default-members = ["ckan"]
+default-members = ["ckan", "realtime"]
 
 [workspace.package]
 edition = "2024"
@@ -60,3 +60,11 @@ clap = { version = "4", features = ["derive"] }
 
 # async traits
 async-trait = "0.1"
+
+# protobuf (GTFS-RT decoding)
+prost = "0.14"
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+# kafka/redpanda client — pure Rust (no librdkafka/cmake toolchain required)
+rskafka = "0.6"
