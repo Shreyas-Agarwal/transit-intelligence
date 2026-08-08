@@ -64,8 +64,8 @@ pub fn convert_directory(csv_dir: &Path, parquet_dir: &Path) -> Result<(), Parqu
 /// order of a few hundred MB as UTF-8 text, and this runs once per snapshot on
 /// a twice-weekly cadence, not on a hot path.
 fn convert_file(csv_path: &Path, parquet_path: &Path) -> Result<(), ParquetError> {
-    let header_file =
-        File::open(csv_path).map_err(|e| ParquetError::CsvRead(csv_path.to_path_buf(), e.into()))?;
+    let header_file = File::open(csv_path)
+        .map_err(|e| ParquetError::CsvRead(csv_path.to_path_buf(), e.into()))?;
     let (header_schema, _) = Format::default()
         .with_header(true)
         .infer_schema(header_file, Some(0))
@@ -81,8 +81,8 @@ fn convert_file(csv_path: &Path, parquet_path: &Path) -> Result<(), ParquetError
             .collect::<Vec<_>>(),
     ));
 
-    let data_file =
-        File::open(csv_path).map_err(|e| ParquetError::CsvRead(csv_path.to_path_buf(), e.into()))?;
+    let data_file = File::open(csv_path)
+        .map_err(|e| ParquetError::CsvRead(csv_path.to_path_buf(), e.into()))?;
     let mut csv_reader = ReaderBuilder::new(schema.clone())
         .with_header(true)
         .build(data_file)

@@ -1,6 +1,6 @@
 [tools]
 python = "latest"
-rust = "latest"
+rust = { version = "latest", components = "rustfmt,clippy" }
 uv = "latest"
 
 # --- Repository governance tooling ---
