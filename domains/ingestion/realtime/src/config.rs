@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use ti_common::config::{env_or, env_parsed_or, load_dotenv, require_env};
 use ti_common::ConfigError;
+use ti_common::config::{env_or, env_parsed_or, load_dotenv, require_env};
 
 pub struct RealtimeConfig {
     /// Combined GTFS-RT feed URL from Open Data Swiss.

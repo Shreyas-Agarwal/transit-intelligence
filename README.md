@@ -111,20 +111,13 @@ Transit Intelligence is designed for:
 
 ## Project Structure
 
+Per ADR 0013 (domain-first workspace organization), the repository is organized around bounded contexts, not languages — each domain owns its own manifests and is independently buildable/testable/lintable from within its own directory.
+
 ```text
 transit-intelligence/
-├── apps/
-│   ├── web/          # Frontend portal
-│   ├── api/          # Core REST API
-│   ├── workers/       # Ingestion and processing workers
-│   ├── gateway/       # API gateway
-│   └── cli/           # Administrative CLI tooling
-├── packages/
-│   ├── shared-config/ # Lint, format, and TypeScript base configs
-│   ├── shared-types/  # Shared domain types and schemas
-│   ├── shared-logger/ # Structured logging with correlation tracing
-│   ├── shared-errors/ # Centralized error boundaries and handler types
-│   └── shared-db/     # Database connection drivers (Postgres, DuckDB, ClickHouse)
+├── domains/
+│   ├── ingestion/      # Rust — GTFS-S/GTFS-RT acquisition (ckan, realtime, service-alerts)
+│   └── gtfs_s/         # Python — GTFS static subset pipeline (uv-managed)
 ├── infrastructure/
 │   ├── docker/         # Service Dockerfiles
 │   ├── nginx/          # Gateway configuration
@@ -134,8 +127,10 @@ transit-intelligence/
 │   ├── adr/            # Architecture Decision Records
 │   ├── design/         # Component and lifecycle design documents
 │   └── development/    # Per-service setup and run instructions
-└── tests/              # Integration, E2E, load, and contract tests
+└── mise.toml           # Repository-wide toolchain version defaults
 ```
+
+An earlier TypeScript-based prototype (`apps/*`, shared `packages/*`) explored a frontend, REST API, and gateway; it didn't go anywhere operationally and has been removed. `network-explorer` now lives as its own separate project outside this repository.
 
 ---
 

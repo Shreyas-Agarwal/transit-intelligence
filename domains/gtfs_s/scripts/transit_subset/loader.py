@@ -1,5 +1,7 @@
 import polars as pl
+
 from .paths import GTFS_DIR
+
 
 class GtfsLoader:
     @staticmethod

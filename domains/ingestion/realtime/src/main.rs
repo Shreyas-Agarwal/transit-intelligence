@@ -154,7 +154,11 @@ async fn explore(cfg: RealtimeConfig) -> Result<()> {
     let fetch_start = Instant::now();
     let buffer = fetch_feed_buffer(&http, &cfg.feed_url, &cfg.feed_api_token).await?;
     let fetch_ms = fetch_start.elapsed().as_millis();
-    tracing::info!(bytes = buffer.len(), fetch_latency_ms = fetch_ms, "feed fetched");
+    tracing::info!(
+        bytes = buffer.len(),
+        fetch_latency_ms = fetch_ms,
+        "feed fetched"
+    );
 
     let decode_start = Instant::now();
     let feed = decode_feed_buffer(&buffer)?;

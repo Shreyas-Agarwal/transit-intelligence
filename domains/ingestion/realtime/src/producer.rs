@@ -89,7 +89,11 @@ impl RedpandaProducer {
     }
 
     /// Publishes `messages` to `topic` in batches of [`PRODUCE_BATCH_SIZE`].
-    pub async fn publish(&mut self, topic: &'static str, messages: Vec<KafkaMessage>) -> Result<()> {
+    pub async fn publish(
+        &mut self,
+        topic: &'static str,
+        messages: Vec<KafkaMessage>,
+    ) -> Result<()> {
         let partition_client = self.partition_client(topic).await?;
 
         for batch in messages.chunks(PRODUCE_BATCH_SIZE) {

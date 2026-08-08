@@ -5,8 +5,8 @@ from typing import Any, Dict
 
 import polars as pl
 
-from transit_subset.paths import PROCESSED_DIR, GTFS_DIR
 from transit_subset.logger import get_logger
+from transit_subset.paths import GTFS_DIR, PROCESSED_DIR
 
 logger = get_logger(__name__)
 

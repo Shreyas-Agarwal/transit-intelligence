@@ -1,9 +1,10 @@
 import json
-from unittest.mock import patch, MagicMock
-from pathlib import Path
+from unittest.mock import patch
+
 import polars as pl
-from transit_subset.artifact_writer import ArtifactWriter
 from transit_subset.artifact_names import ArtifactNames
+from transit_subset.artifact_writer import ArtifactWriter
+
 
 @patch("transit_subset.artifact_writer.PROCESSED_DIR")
 def test_write(mock_processed_dir, tmp_path):

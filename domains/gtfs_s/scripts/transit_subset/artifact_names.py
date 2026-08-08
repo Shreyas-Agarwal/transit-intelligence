@@ -1,5 +1,6 @@
 from typing import Final
 
+
 class ArtifactNames:
     ZURICH_STOPS: Final[str] = "stops/zurich_stops.parquet"
     ZURICH_TRIP_IDS: Final[str] = "trips/zurich_trip_ids.parquet"

@@ -639,14 +639,24 @@ mod tests {
     fn build_messages_drops_deleted_entities() {
         let mut entity = vehicle_entity("e1", Some("v1"));
         entity.is_deleted = Some(true);
-        let messages = build_messages(&[entity], "2026-01-01T00:00:00Z", "2.0", "2026-01-01T00:00:01Z");
+        let messages = build_messages(
+            &[entity],
+            "2026-01-01T00:00:00Z",
+            "2.0",
+            "2026-01-01T00:00:01Z",
+        );
         assert!(messages.is_empty());
     }
 
     #[test]
     fn build_messages_wraps_entities_in_envelope() {
         let entity = trip_update_entity("e2", Some("trip:sbb:8001"));
-        let messages = build_messages(&[entity], "2026-01-01T00:00:00Z", "2.0", "2026-01-01T00:00:01Z");
+        let messages = build_messages(
+            &[entity],
+            "2026-01-01T00:00:00Z",
+            "2.0",
+            "2026-01-01T00:00:01Z",
+        );
         assert_eq!(messages.len(), 1);
         let value: serde_json::Value = serde_json::from_str(&messages[0].value).unwrap();
         assert_eq!(value["entity_type"], "TRIP_UPDATE");

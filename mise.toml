@@ -1,6 +1,4 @@
 [tools]
-node = "24"
-pnpm = "11"
 python = "latest"
 rust = "latest"
 uv = "latest"

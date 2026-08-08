@@ -1,5 +1,7 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
 from transit_subset.loader import GtfsLoader
+
 
 @patch("transit_subset.loader.pl")
 def test_loader_stops(mock_pl):
