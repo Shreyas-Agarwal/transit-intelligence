@@ -1,0 +1,109 @@
+name: Governance
+
+# Checks that apply repo-wide regardless of which domain(s) a PR touches:
+# commit-message policy, docs prose/structure, and workflow-file lint. None
+# of this is a domain's build/lint/test (see ci.yml for that).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly full-history gitleaks scan as a backstop beyond per-PR diff
+    # scanning and local pre-commit/pre-push hooks (both bypassable with
+    # --no-verify).
+    - cron: "0 6 * * 1"
+
+jobs:
+  commit-policy:
+    name: Conform (Conventional Commits + DCO)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
+
+      - name: Check every commit on this PR
+        run: conform enforce --base-branch "origin/${{ github.base_ref }}"
+
+  markdownlint:
+    name: Markdownlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
+
+      - name: Lint markdown
+        run: markdownlint-cli2
+
+  vale:
+    name: Vale
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
+
+      - name: Sync style packages
+        run: vale sync
+
+      # Advisory: prose style is a nudge, not a merge gate.
+      - name: Lint prose
+        run: vale --glob='*.md' .
+        continue-on-error: true
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
+
+      - name: Lint workflow files
+        run: actionlint
+
+  gitleaks-full-scan:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
+
+      - name: Scan full git history
+        run: gitleaks detect --source . -v
+
+  gitleaks-diff-scan:
+    name: gitleaks (PR diff)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install toolchains (mise.toml)
+        uses: jdx/mise-action@v2
+
+      - name: Scan PR commit range
+        run: gitleaks detect --source . -v --log-opts="origin/${{ github.base_ref }}..HEAD"

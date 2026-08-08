@@ -1,0 +1,5 @@
+# actionlint defaults are sufficient today; this file exists so overrides
+# have an obvious home if a workflow later needs one (e.g. self-hosted
+# runner labels actionlint doesn't recognize).
+self-hosted-runner:
+  labels: []
