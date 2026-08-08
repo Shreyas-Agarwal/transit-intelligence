@@ -9,4 +9,5 @@
 pub mod config;
 pub mod decoder;
 pub mod fetcher;
+pub mod model;
 pub mod proto;
