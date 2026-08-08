@@ -10,13 +10,13 @@ Accepted
 
 ---
 
-# Context
+## Context
 
 Phase 1 of Transit Intelligence requires exploratory and operational analytics over Zurich GTFS Static datasets.
 
 Initial architectural assumptions considered three possible analytical delivery models:
 
-## Option A — Backend Semantic Layer
+### Option A — Backend Semantic Layer
 
 ```text
 Parquet
@@ -43,7 +43,7 @@ Disadvantages:
 
 ---
 
-## Option B — Hybrid Architecture
+### Option B — Hybrid Architecture
 
 ```text
 Parquet
@@ -66,7 +66,7 @@ Disadvantages:
 
 ---
 
-## Option C — Edge-First Analytics
+### Option C — Edge-First Analytics
 
 ```text
 Parquet
@@ -94,7 +94,7 @@ Disadvantages:
 
 ---
 
-# Decision Drivers
+## Decision Drivers
 
 The following questions were identified during Sprint 03:
 
@@ -105,7 +105,7 @@ The following questions were identified during Sprint 03:
 
 ---
 
-# Validation Activities
+## Validation Activities
 
 Sprint 03 implemented:
 
@@ -139,9 +139,9 @@ zurich_stop_times.parquet
 
 ---
 
-# Benchmark Findings
+## Benchmark Findings
 
-## Overview Queries
+### Overview Queries
 
 Typical latency:
 
@@ -157,7 +157,7 @@ Examples:
 
 ---
 
-## Aggregation Queries
+### Aggregation Queries
 
 Typical latency:
 
@@ -173,7 +173,7 @@ Examples:
 
 ---
 
-## Join Queries
+### Join Queries
 
 Typical latency:
 
@@ -188,7 +188,7 @@ Examples:
 
 ---
 
-## Observations
+### Observations
 
 The browser remained responsive during all benchmark scenarios.
 
@@ -202,7 +202,7 @@ The largest dataset (2.7 million stop-time records) remained analytically usable
 
 ---
 
-# Additional Findings
+## Additional Findings
 
 An unplanned outcome of Sprint 03 was the emergence of a browser-native analytical workbench.
 
@@ -223,11 +223,11 @@ However, it provides additional evidence supporting browser-resident analytical 
 
 ---
 
-# Decision
+## Decision
 
 Transit Intelligence will adopt:
 
-## Edge-First Analytics
+### Edge-First Analytics
 
 ```text
 Parquet
@@ -247,9 +247,9 @@ Backend semantic services will not be introduced during Phase 1.
 
 ---
 
-# Consequences
+## Consequences
 
-## Positive
+### Positive
 
 * No analytical backend required
 * Simplified deployment model
@@ -260,7 +260,7 @@ Backend semantic services will not be introduced during Phase 1.
 
 ---
 
-## Negative
+### Negative
 
 * Browser memory becomes a scalability boundary
 * Larger future datasets may require partitioning
@@ -269,7 +269,7 @@ Backend semantic services will not be introduced during Phase 1.
 
 ---
 
-# Deferred Decisions
+## Deferred Decisions
 
 The following remain out of scope for this ADR:
 

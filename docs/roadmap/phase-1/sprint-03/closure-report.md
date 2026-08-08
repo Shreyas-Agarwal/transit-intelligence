@@ -9,7 +9,7 @@
 
 ---
 
-# Sprint Goal
+## Sprint Goal
 
 Validate whether browser-local analytics can support Zurich-scale GTFS datasets without requiring a backend semantic layer.
 
@@ -31,7 +31,7 @@ The primary deliverable was evidence supporting an architectural decision regard
 
 ---
 
-# Summary
+## Summary
 
 Sprint 03 successfully validated browser-local analytical execution using DuckDB WASM and a browser-resident semantic layer.
 
@@ -51,7 +51,7 @@ These capabilities provided stronger evidence than originally anticipated for ev
 
 ---
 
-# Dataset Profile
+## Dataset Profile
 
 | Artifact   |      Rows |
 | ---------- | --------: |
@@ -71,15 +71,15 @@ zurich_stop_times.parquet
 
 ---
 
-# Objectives Review
+## Objectives Review
 
-## Objective 1 – Browser Analytics Foundation
+### Objective 1 – Browser Analytics Foundation
 
-### Status
+#### Status
 
 Completed
 
-### Achievements
+#### Achievements
 
 * DuckDB WASM configured
 * Browser-local Parquet loading implemented
@@ -87,19 +87,19 @@ Completed
 * Benchmark framework implemented
 * Query latency measured
 
-### Result
+#### Result
 
 Interactive analytical execution achieved without backend aggregation.
 
 ---
 
-## Objective 2 – Network Explorer Prototype
+### Objective 2 – Network Explorer Prototype
 
-### Status
+#### Status
 
 Completed
 
-### Achievements
+#### Achievements
 
 Implemented analytical dashboards supporting:
 
@@ -112,13 +112,13 @@ The implementation ultimately evolved into a generalized analytical workspace ra
 
 ---
 
-## Objective 3 – Spatial Visualization
+### Objective 3 – Spatial Visualization
 
-### Status
+#### Status
 
 Completed
 
-### Achievements
+#### Achievements
 
 Implemented:
 
@@ -131,13 +131,13 @@ No preprocessing layer was required.
 
 ---
 
-## Objective 4 – Semantic Layer Validation
+### Objective 4 – Semantic Layer Validation
 
-### Status
+#### Status
 
 Completed
 
-### Achievements
+#### Achievements
 
 Validated browser-resident semantic execution.
 
@@ -155,13 +155,13 @@ SQL views and semantic logic executed successfully within DuckDB WASM.
 
 ---
 
-## Objective 5 – ADR 0012
+### Objective 5 – ADR 0012
 
-### Status
+#### Status
 
 Completed
 
-### Outcome
+#### Outcome
 
 ADR 0012 recommends:
 
@@ -173,9 +173,9 @@ for Phase 1 static GTFS analytical workloads.
 
 ---
 
-# Benchmark Results
+## Benchmark Results
 
-## DuckDB Initialization
+### DuckDB Initialization
 
 ```text
 ~1.1 seconds
@@ -183,7 +183,7 @@ for Phase 1 static GTFS analytical workloads.
 
 ---
 
-## Parquet Loading
+### Parquet Loading
 
 ```text
 ~216 milliseconds
@@ -191,7 +191,7 @@ for Phase 1 static GTFS analytical workloads.
 
 ---
 
-## Overview Queries
+### Overview Queries
 
 ```text
 15–35 ms
@@ -205,7 +205,7 @@ Examples:
 
 ---
 
-## Aggregation Queries
+### Aggregation Queries
 
 ```text
 150–250 ms
@@ -219,7 +219,7 @@ Examples:
 
 ---
 
-## Join Queries
+### Join Queries
 
 ```text
 650–1300 ms
@@ -232,7 +232,7 @@ Examples:
 
 ---
 
-## Observations
+### Observations
 
 Browser responsiveness remained acceptable throughout all benchmark scenarios.
 
@@ -244,7 +244,7 @@ No materialized views were required.
 
 ---
 
-# Architectural Decision
+## Architectural Decision
 
 Sprint 03 validated:
 
@@ -264,7 +264,7 @@ Backend semantic services are not required during Phase 1.
 
 ---
 
-# Deliverables
+## Deliverables
 
 Completed:
 
@@ -281,7 +281,7 @@ Completed:
 
 ---
 
-# Sprint Outcome
+## Sprint Outcome
 
 Sprint 03 successfully validated the Edge-First Analytics architecture.
 

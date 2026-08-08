@@ -108,7 +108,7 @@ rpk topic alter-config transit.snapshots.raw --set retention.ms=604800000
 
 WSL2 automatically forwards `localhost` ports to the Windows host. The ingestion worker (`domains/ingestion/realtime`, built on `rskafka`) connects using:
 
-```
+```text
 REDPANDA_BROKERS=localhost:9092
 ```
 

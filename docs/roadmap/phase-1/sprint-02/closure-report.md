@@ -10,7 +10,7 @@
 
 ---
 
-# Sprint Goal
+## Sprint Goal
 
 Establish the foundational data acquisition layer for the Transit Intelligence Platform.
 
@@ -25,11 +25,11 @@ During implementation, the sprint expanded to include GTFS Static preprocessing 
 
 ---
 
-# Delivered
+## Delivered
 
-## GTFS-RT Ingestion Foundation
+### GTFS-RT Ingestion Foundation
 
-### Feed Exploration
+#### Feed Exploration
 
 Completed:
 
@@ -46,7 +46,7 @@ Observed feed characteristics:
 * Alerts absent
 * Full dataset snapshots
 
-### Redpanda Integration
+#### Redpanda Integration
 
 Completed:
 
@@ -62,7 +62,7 @@ Topics established:
 * transit.state.deltas
 * transit.metrics.operational
 
-### Architecture Documentation
+#### Architecture Documentation
 
 Completed:
 
@@ -74,11 +74,11 @@ Completed:
 
 ---
 
-## GTFS Static Processing Layer
+### GTFS Static Processing Layer
 
 A new GTFS Static domain was introduced.
 
-### GTFS-S Exploration
+#### GTFS-S Exploration
 
 Completed:
 
@@ -87,7 +87,7 @@ Completed:
 * Zurich boundary investigation
 * Stop density analysis
 
-### Zurich Operational Subset
+#### Zurich Operational Subset
 
 Generated artifacts:
 
@@ -100,7 +100,7 @@ Generated artifacts:
 | Zurich Calendar Services |    13,840 |
 | Zurich Agencies          |        18 |
 
-### Service Classification
+#### Service Classification
 
 Trips classified as:
 
@@ -117,7 +117,7 @@ Routes classified as:
 | Crossing |   171 |
 | Mixed    |    31 |
 
-### Artifact Generation Framework
+#### Artifact Generation Framework
 
 Implemented:
 
@@ -129,7 +129,7 @@ Implemented:
 
 ---
 
-## Repository Modernization
+### Repository Modernization
 
 Completed:
 
@@ -140,24 +140,24 @@ Completed:
 
 ---
 
-# Deliverables Produced
+## Deliverables Produced
 
-## Applications
+### Applications
 
 * apps/ingestion
 
-## Domains
+### Domains
 
 * domains/gtfs_s
 
-## Documentation
+### Documentation
 
 * Architecture documentation
 * Runbooks
 * Design documents
 * ADRs
 
-## Data Artifacts
+### Data Artifacts
 
 * Zurich GTFS Static subset
 * Manifest metadata
@@ -165,7 +165,7 @@ Completed:
 
 ---
 
-# Definition of Done Review
+## Definition of Done Review
 
 | Item                       | Status   |
 | -------------------------- | -------- |
@@ -182,7 +182,7 @@ Completed:
 
 ---
 
-# Sprint Outcome
+## Sprint Outcome
 
 Sprint 02 successfully established the platform's first operational data layer.
 

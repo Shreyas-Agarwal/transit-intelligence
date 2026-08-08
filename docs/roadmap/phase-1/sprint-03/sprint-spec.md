@@ -8,7 +8,7 @@
 
 ---
 
-# Sprint Goal
+## Sprint Goal
 
 Build the first user-facing Transit Network Explorer using the Zurich GTFS Static subset.
 
@@ -32,7 +32,7 @@ Interactive Analytics
 
 ---
 
-# Background
+## Background
 
 Sprint 02 produced a complete Zurich GTFS Static subset.
 
@@ -60,13 +60,13 @@ Sprint 03 validates this assumption.
 
 ---
 
-# Objectives
+## Objectives
 
-## Objective 1 – Browser Analytics Foundation
+### Objective 1 – Browser Analytics Foundation
 
 Establish browser-local analytical execution.
 
-### Tasks
+#### Tasks
 
 * Configure DuckDB WASM
 * Load Parquet artifacts directly in browser
@@ -74,7 +74,7 @@ Establish browser-local analytical execution.
 * Benchmark startup time
 * Benchmark aggregation latency
 
-### Success Criteria
+#### Success Criteria
 
 Demonstrate interactive analytical queries over:
 
@@ -87,15 +87,15 @@ without backend aggregation.
 
 ---
 
-## Objective 2 – Network Explorer Prototype
+### Objective 2 – Network Explorer Prototype
 
 Build a single analytical dashboard.
 
 The goal is architectural validation, not feature completeness.
 
-### Required Views
+#### Required Views
 
-#### Network Overview
+##### Network Overview
 
 Display:
 
@@ -105,7 +105,7 @@ Display:
 * Total Agencies
 * Total Stop Times
 
-#### Service Composition
+##### Service Composition
 
 Display:
 
@@ -118,7 +118,7 @@ Display:
 * Crossing Routes
 * Mixed Routes
 
-#### Agency Breakdown
+##### Agency Breakdown
 
 Display:
 
@@ -127,15 +127,15 @@ Display:
 
 ---
 
-## Objective 3 – Spatial Visualization
+### Objective 3 – Spatial Visualization
 
 Display Zurich transit stops.
 
-### Technology
+#### Technology
 
 * MapLibre
 
-### Required Features
+#### Required Features
 
 * Pan
 * Zoom
@@ -148,24 +148,24 @@ No realtime data required.
 
 ---
 
-## Objective 4 – Semantic Layer Validation
+### Objective 4 – Semantic Layer Validation
 
 Evaluate whether SQL views inside DuckDB WASM can serve as the semantic layer.
 
 Candidate views:
 
-### route_summary
+#### route_summary
 
 * route count
 * trip count
 * stop count
 
-### agency_summary
+#### agency_summary
 
 * route count
 * trip count
 
-### network_summary
+#### network_summary
 
 * global metrics
 
@@ -176,11 +176,11 @@ Determine:
 
 ---
 
-## Objective 5 – ADR 0012
+### Objective 5 – ADR 0012
 
 Produce a formal architectural recommendation.
 
-### ADR 0012
+#### ADR 0012
 
 Analytical Delivery Architecture
 
@@ -196,13 +196,13 @@ Decision options:
 
 ---
 
-# Deliverables
+## Deliverables
 
-## Application
+### Application
 
 `apps/network-explorer`
 
-### Technology Stack
+#### Technology Stack
 
 * React
 * TypeScript
@@ -213,17 +213,17 @@ Decision options:
 
 ---
 
-## Documentation
+### Documentation
 
-### ADR 0012
+#### ADR 0012
 
 Analytical Delivery Architecture
 
-### Design Document
+#### Design Document
 
 Network Explorer Architecture
 
-### Benchmark Notes
+#### Benchmark Notes
 
 Document:
 
@@ -234,7 +234,7 @@ Document:
 
 ---
 
-# Definition of Done
+## Definition of Done
 
 * [ ] DuckDB WASM configured
 * [ ] Parquet artifacts loaded in browser
@@ -249,7 +249,7 @@ Document:
 
 ---
 
-# Explicitly Out of Scope
+## Explicitly Out of Scope
 
 * GTFS-RT enrichment
 * Historical analytics
@@ -264,7 +264,7 @@ Document:
 
 ---
 
-# Success Criteria
+## Success Criteria
 
 At sprint completion we should be able to answer:
 
