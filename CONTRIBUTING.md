@@ -43,6 +43,8 @@ lefthook install
 
 Vale's style package is vendored under `tools/governance/vale/styles/` so it works offline out of the box; run `vale sync` to refresh it after an upstream update.
 
+`.editorconfig-checker.json` disables the indentation/indent-size checks: those two flag any whitespace not aligned to a multiple of the configured `indent_size`, which false-positives on deliberately-indented ASCII diagrams in prose docs (see e.g. the diagram in ADR 0012) and is redundant for source code anyway — Rust and Python indentation correctness is already enforced by `cargo fmt`/`ruff format` in each domain's own lint step. The other checks (trailing whitespace, final newline, charset) stay on for every file type.
+
 ## Branching Model
 
 Name your branches using the following prefixes:
