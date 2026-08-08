@@ -6,7 +6,7 @@
 //! already strips `Authorization` when a redirect crosses to a different
 //! host, so a redirect to a third party never leaks the token.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Fetches the raw protobuf body from `feed_url`, attaching the bearer token
 /// only when the target host is `opentransportdata.swiss` (or a subdomain).

@@ -1,5 +1,9 @@
 name: Continuous Integration
 
+# Per ADR 0013 (domain-first workspace organization), CI orchestrates domains
+# rather than owning a shared build — each job cd's into its domain and uses
+# only the manifests contained within it.
+
 on:
   push:
     branches: [main]
@@ -7,36 +11,61 @@ on:
     branches: [main]
 
 jobs:
-  verify:
-    name: Verify Codebase
+  ingestion-rust:
+    name: domains/ingestion (Rust)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: domains/ingestion
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          version: 11.1.3
+          components: clippy, rustfmt
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: 24.15.0
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+          workspaces: domains/ingestion
 
       - name: Check formatting
-        run: pnpm run format:check
+        run: cargo fmt --all -- --check
 
-      - name: Lint codebase
-        run: pnpm run lint
+      - name: Lint
+        run: cargo clippy --workspace --all-targets
 
-      - name: Run builds
-        run: pnpm run build
+      - name: Test
+        run: cargo test --workspace
 
-      - name: Execute tests
-        run: pnpm run test
+  gtfs-s-python:
+    name: domains/gtfs_s (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: domains/gtfs_s
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          working-directory: domains/gtfs_s
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run pyright
+
+      # `uv run pytest` isn't wired in here: transit_subset's tests depend on
+      # a downloaded GTFS-S snapshot under domains/gtfs_s/raw (see
+      # scripts/README.md), which CI has no step to fetch yet.
