@@ -7,5 +7,6 @@
 //! independently testable without a live feed endpoint or Redpanda broker.
 
 pub mod config;
+pub mod decoder;
 pub mod fetcher;
 pub mod proto;
