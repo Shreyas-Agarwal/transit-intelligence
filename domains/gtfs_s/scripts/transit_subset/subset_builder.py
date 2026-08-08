@@ -3,6 +3,7 @@ import polars as pl
 from .config import ZurichConfig
 from .loader import GtfsLoader
 
+
 class ZurichSubsetBuilder:
     def __init__(self) -> None:
         self.config = ZurichConfig()

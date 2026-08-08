@@ -1,5 +1,6 @@
-import pytest
 import polars as pl
+import pytest
+
 
 @pytest.fixture
 def mock_stops() -> pl.DataFrame:
