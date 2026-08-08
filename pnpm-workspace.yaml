@@ -1,9 +1,0 @@
-packages:
-  - 'apps/*'
-  - 'packages/*'
-
-engineStrict: true
-
-allowBuilds:
-  duckdb: true
-  'esbuild': true
