@@ -84,3 +84,7 @@ htmlcov/
 */gtfs_s/parquet
 
 */*/feed_exploration_output.json
+
+# Local data lake (bronze/silver/gold) — downloaded/generated, never committed.
+# GTFS-S snapshots from the ckan downloader land in /data/bronze/static.
+/data/

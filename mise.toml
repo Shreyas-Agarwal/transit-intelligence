@@ -4,3 +4,8 @@ pnpm = "11"
 python = "latest"
 rust = "latest"
 uv = "latest"
+
+[tasks."ingestion:gtfs-static"]
+description = "Run the GTFS-S static downloader: detect, download, verify, and publish new snapshots (docs/design/gtfs-static-auto-downloader.md)"
+dir = "domains/ingestion"
+run = "cargo run --release -p ckan"

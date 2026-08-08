@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft — this is the design for work planned in the current sprint. No implementation exists yet.
+Implemented — see the `ckan` crate under `domains/ingestion/`. This document reflects the design as built, including the CKAN API schema/auth details confirmed during implementation.
 
 ## Related documents
 
@@ -59,6 +59,11 @@ GTFS_DIR = sorted(RAW_DIR.glob("gtfs_fp*"), reverse=True)[0]
 ```
 
 No symlink exists yet, no version manifest exists yet.
+
+**Storage location, decided during implementation:** the automated downloader does **not** write into `domains/gtfs_s/raw/` as the baseline above and earlier drafts of this section assumed. It writes into `data/bronze/static/` at the repo root instead — a dedicated data-lake location (bronze/silver/gold layering) independent of any one domain's source tree, since the raw snapshot store is data, not code, and doesn't belong nested inside `domains/`. Every path in §§2–7 below (`raw/<version>/`, `raw/.manifest.json`, `raw/latest`, etc.) should be read as relative to `data/bronze/static/`, not `domains/gtfs_s/raw/`. Two consequences worth being explicit about:
+
+* The pre-existing manual snapshots shown in the baseline above are **not** picked up by the automated downloader's "already installed?" check (§2) — they live in a different directory entirely, not merely one without a sidecar. They're untouched (nothing in this design ever deletes across directory trees), but the downloader will re-download every eligible version fresh into `data/bronze/static/` rather than adopting them in place. The [cutoff version](#1-version-detection) exists partly to bound how much history that re-download implies.
+* [§9 Consumer cutover](#9-consumer-cutover) below — switching `transit_subset/paths.py` from its glob to `raw/latest` — now also needs to repoint `RAW_DIR` itself at the new location, not just add the symlink. That switch is still a follow-up, not part of this implementation (see §9).
 
 ---
 
@@ -119,7 +124,7 @@ domains/ingestion/
 
 This is a better fit than the `domains/gtfs_s/downloader/` location floated in an earlier draft of this design: `domains/ingestion` is already an established Rust workspace for exactly this class of work (acquiring feeds from opentransportdata.swiss), and the `ckan` crate's `Cargo.toml` already carries the dependencies this design assumes (`reqwest`, `tokio`, `serde`/`serde_json`, `sha2`, `clap`, `anyhow`, workspace-shared via `[workspace.dependencies]`) — nothing about the tooling choices in §5/§6 requires deviating from what's already scaffolded there. Shared logic (config loading, error types) belongs in `common`/`ti-common`, matching how `realtime` and `service-alerts` already depend on it, rather than being duplicated inside `ckan`.
 
-The GTFS-S raw data itself still lands under `domains/gtfs_s/raw/` (§2–§4 below) — the `ckan` crate reads its CKAN/download config from its own domain (`domains/ingestion`) but writes snapshots into `gtfs_s`'s data directory, which is also where the existing Python subset pipeline (`domains/gtfs_s/scripts/`) already expects to find them.
+The GTFS-S raw data lands under `data/bronze/static/` (§2–§4 below, decided during implementation — see the storage location note above) — the `ckan` crate reads its CKAN/download config from its own domain (`domains/ingestion`) but writes snapshots into this repo-root data-lake location, not into `domains/gtfs_s/`. The existing Python subset pipeline (`domains/gtfs_s/scripts/`) will need to be pointed at the new location as part of the [Consumer cutover](#9-consumer-cutover) follow-up.
 
 > **Governance note:** ADR 0010 establishes TypeScript and Python as the platform's two first-class languages, chosen by workload (I/O → TypeScript, computation → Python). `domains/ingestion` is already a Rust workspace covering GTFS-RT realtime ingestion and service-alerts ingestion, so this design's use of Rust extends an existing, if not yet ADR-documented, pattern rather than introducing a one-off exception. It's still worth an ADR 0010 amendment (or a new ADR) to formally recognize Rust as a third first-class language for this class of I/O-plus-systems workload, rather than leaving it as implicit precedent scattered across designs — flagging it here so it isn't lost; not resolving it in this document.
 
@@ -134,7 +139,7 @@ GET {GTFS_S_CKAN_API_URL}/action/package_show?id=timetable-2026-gtfs2020
 
 which returns a JSON `resources` array with per-file metadata (name, download URL, last-modified). This is preferred over scraping the HTML dataset page, since resource ordering/markup on the page is not a stable contract.
 
-This resolves the earlier open question: the initial probe against `data.opentransportdata.swiss/api/3/action/...` (the public dataset-browsing host) returned `403`, which was simply the wrong host — `api.opentransportdata.swiss/ckan-api` is the correct CKAN API endpoint for this platform. Access is authenticated with a token + token hash issued under the same opentransportdata.swiss application as the existing `GTFS_RT_API_TOKEN` (see `.env.example`):
+This resolves the earlier open question: the initial probe against `data.opentransportdata.swiss/api/3/action/...` (the public dataset-browsing host) returned `403`, which was simply the wrong host — `api.opentransportdata.swiss/ckan-api` is the correct CKAN API endpoint for this platform. Access is authenticated with a token issued under the same opentransportdata.swiss application as the existing `GTFS_RT_API_TOKEN` (see `.env.example`):
 
 ```text
 GTFS_S_CKAN_DATASET_ID=timetable-2026-gtfs2020
@@ -142,23 +147,47 @@ GTFS_S_CKAN_API_TOKEN=...
 GTFS_S_CKAN_API_TOKEN_HASH=...
 ```
 
-Remaining implementation detail (not a design blocker): confirm exactly how the token and token hash are expected to be presented (e.g. as request headers vs. query parameters, and under what header names) against opentransportdata.swiss's CKAN API auth docs when writing the HTTP client.
+**Confirmed against the live API** (was open question 1): a bearer token alone is sufficient — `Authorization: Bearer {GTFS_S_CKAN_API_TOKEN}` on the `package_show` request. `GTFS_S_CKAN_API_TOKEN_HASH` is issued alongside the token as part of the same credential pair and is still loaded/required at config time for parity with `GTFS_RT_API_TOKEN`'s scheme, but the CKAN API itself did not require it to be sent.
+
+The real response shape differs from a naive reading of the CKAN docs in one important way: `resources[].name`/`title`/`description` are **locale-keyed objects** (`{"de": "...", "en": "...", "fr": "...", "it": "..."}`), not plain filename strings. The filename (and therefore the version date) has to come from the last path segment of `resources[].url` instead. The fields this design actually uses:
+
+```json
+{
+  "success": true,
+  "result": {
+    "resources": [
+      {
+        "url": "https://.../GTFS_FP2026_20260805.zip",
+        "format": "ZIP",
+        "last_modified": "2026-08-05T22:03:00",
+        "hash": "…"
+      }
+    ]
+  }
+}
+```
+
+* `format` (case-insensitively `"zip"`) or a `.zip`-suffixed `url` identifies GTFS zip resources among the dataset's other resources.
+* `last_modified` is catalog metadata from the CKAN API response itself — not an HTTP response header — and is what populates the sidecar's `publisher_last_modified` field (falling back to the `Last-Modified` HTTP header on the resource download only if CKAN didn't supply one).
+* `hash`, when present, resolves open question 2 below.
 
 Detection produces a list of `(version_id, download_url)` pairs, where `version_id` is the date extracted from the filename (normalized to `YYYYMMDD`), not the raw filename — so comparisons are robust to the naming-convention drift already observed in the dataset's history (`GTFS_FP2026_YYYYMMDD.zip` vs. the legacy hyphenated-date form).
 
+**Cutoff version** — per the Non-goals ("we start tracking from whatever we adopt as our first automated pull, plus whatever's already on disk"), discovery ignores any upstream version older than a configurable cutoff, as if it were never published. Defaults to `20260101`; configurable via `GTFS_S_CUTOFF_VERSION` (`YYYYMMDD`, or an empty string to disable and consider the CKAN catalog's full history). This is what actually enforces the "no historical backfill" non-goal — without it, a first run against a catalog with years of resources would download every one of them.
+
 ### 2. Source of truth: filesystem first, manifest as a rebuildable index
 
-The filesystem is authoritative. A version is "installed" if and only if `domains/gtfs_s/raw/<version>/` exists **and** contains a valid metadata sidecar written at the end of a successful pipeline run (see step 4 below). The manifest is a derived cache over that filesystem state, kept around purely for fast lookups (avoiding a re-validation pass on every run) — it must never be the only place a fact is recorded.
+The filesystem is authoritative. A version is "installed" if and only if `data/bronze/static/<version>/` exists **and** contains a valid metadata sidecar written at the end of a successful pipeline run (see step 4 below). The manifest is a derived cache over that filesystem state, kept around purely for fast lookups (avoiding a re-validation pass on every run) — it must never be the only place a fact is recorded.
 
 Concretely:
 
 * Each snapshot directory carries its own sidecar file, written once, at the very end of a successful run, never touched again:
 
   ```text
-  domains/gtfs_s/raw/gtfs_fp2026_20260805/.snapshot-meta.json
+  data/bronze/static/gtfs_fp2026_20260805/.snapshot-meta.json
   ```
 
-* `domains/gtfs_s/raw/.manifest.json` is a rollup index built by scanning `raw/*/.snapshot-meta.json`. **If it's deleted or corrupted, it is regenerated from the sidecars on the next run** — this is a design invariant, not a nice-to-have, and should be exercised by a test (delete the manifest, re-run, confirm it's identical to before).
+* `data/bronze/static/.manifest.json` is a rollup index built by scanning `raw/*/.snapshot-meta.json`. **If it's deleted or corrupted, it is regenerated from the sidecars on the next run** — this is a design invariant, not a nice-to-have, and should be exercised by a test (delete the manifest, re-run, confirm it's identical to before).
 
 This gives us two independent recovery paths instead of one: losing the manifest loses nothing (rebuild from sidecars); losing a sidecar just means that one snapshot directory is treated as not-yet-installed and gets re-downloaded and re-verified, which is safe by construction.
 
@@ -175,15 +204,15 @@ Per-snapshot sidecar (`raw/<version>/.snapshot-meta.json`) — the durable recor
   "archive_sha256": "…",
   "publisher_last_modified": "2026-08-05T22:03:00Z",
   "etag": "\"a1b2c3\"",
-  "extract_path": "domains/gtfs_s/raw/gtfs_fp2026_20260805",
+  "extract_path": "data/bronze/static/gtfs_fp2026_20260805",
   "status": "verified"
 }
 ```
 
 Field notes:
 
-* `archive_sha256` is computed by us over the downloaded bytes. Whether it can also be *checked against* an upstream-supplied checksum depends on what the CKAN resource metadata exposes — unresolved, see [open question 1](#open-questions). Absent that, it still earns its keep: it lets us detect (a) truncated/corrupt downloads via `archive_size_bytes` mismatch against the `Content-Length` header, and (b) the rare case where upstream republishes a zip under the same version/date with different bytes, without needing to keep the zip around forever.
-* `publisher_last_modified` / `etag` come from the HTTP response headers (`Last-Modified`, `ETag`) on the actual resource download — these are available from a plain HTTPS GET/HEAD independent of the CKAN Action API call itself.
+* `archive_sha256` is computed by us over the downloaded bytes. **Resolved (was open question 2):** the CKAN resource metadata does expose a `hash` field. It's checked against `archive_sha256` when it's plausibly a hex SHA-256 (64 hex chars) — the API doesn't document which algorithm populates it, so a non-SHA-256-shaped value is logged and otherwise not treated as a mismatch. Either way, `archive_sha256` earns its keep independent of that: it lets us detect (a) truncated/corrupt downloads via `archive_size_bytes` mismatch against the `Content-Length` header, and (b) the rare case where upstream republishes a zip under the same version/date with different bytes, without needing to keep the zip around forever.
+* `publisher_last_modified` comes from the CKAN resource's own `last_modified` field (see §1), falling back to the `Last-Modified` HTTP response header on the resource download if CKAN didn't supply one. `etag` comes from the `ETag` HTTP response header on that download.
 * `status` is the terminal state for this version (see next section) — a sidecar is only ever written after the pipeline reaches a terminal state, so a sidecar's mere existence already tells you the run for that version finished (successfully or not); there is no `"pending"`/`"downloading"` value persisted here. As noted above, this status reflects **archive-level** structural soundness only — it is not a claim about GTFS content validity, which is checked later by the DuckDB/SQLMesh layer.
 
 Roll-up manifest (`raw/.manifest.json`) — just an index over the sidecars, safe to regenerate:
@@ -193,8 +222,8 @@ Roll-up manifest (`raw/.manifest.json`) — just an index over the sidecars, saf
   "generated_at": "2026-08-06T04:00:20Z",
   "latest": "20260805",
   "versions": {
-    "20260729": { "status": "superseded", "extract_path": "domains/gtfs_s/raw/gtfs_fp2026_20260729" },
-    "20260805": { "status": "verified",    "extract_path": "domains/gtfs_s/raw/gtfs_fp2026_20260805" },
+    "20260729": { "status": "superseded", "extract_path": "data/bronze/static/gtfs_fp2026_20260729" },
+    "20260805": { "status": "verified",    "extract_path": "data/bronze/static/gtfs_fp2026_20260805" },
     "20260722": { "status": "failed",      "extract_path": null }
   }
 }
@@ -259,7 +288,7 @@ Per the resolved decision in Non-goals, **the downloader does not trigger this t
 After all missing versions are downloaded (or after each one, order doesn't matter for correctness — only the final state does), repoint `latest` at the newest **successfully verified** version:
 
 ```bash
-ln -sfn gtfs_fp2026_20260805 domains/gtfs_s/raw/latest
+ln -sfn gtfs_fp2026_20260805 data/bronze/static/latest
 ```
 
 `ln -sfn` is already atomic on POSIX filesystems (it creates a new symlink and renames it over the old one), which is what makes this safe to do while other processes might be reading through `latest` — readers either see the old target or the new one, never a broken/missing link. No custom atomic-swap logic is needed beyond using `-fn` (not `-f` alone, which would put the new link *inside* an existing symlinked directory instead of replacing it — a documented `ln` footgun worth calling out explicitly in the implementation).
@@ -277,16 +306,20 @@ Storage lifecycle is treated as an infrastructure concern, not a downloader conc
 Once the symlink exists and is maintained automatically, `transit_subset/paths.py` should be changed from:
 
 ```python
+RAW_DIR = GTFS_S_DIR / "raw"
 GTFS_DIR = sorted(RAW_DIR.glob("gtfs_fp*"), reverse=True)[0]
 ```
 
 to:
 
 ```python
+RAW_DIR = PROJECT_ROOT / "data" / "bronze" / "static"
 GTFS_DIR = RAW_DIR / "latest"
 ```
 
-This is a follow-up change once the downloader is proven to keep the symlink correct — the glob fallback should keep working in the meantime (both should agree on the answer) rather than ripping it out on day one.
+Two changes bundled together, not one: this both adopts the `latest` symlink *and* repoints `RAW_DIR` at `data/bronze/static/`, the location the automated downloader actually writes to (see the storage location note under [Current state (baseline)](#current-state-baseline) — it differs from what earlier drafts of this design, and the runbook, assumed). Until this cutover happens, `transit_subset/paths.py` will keep globbing the old, no-longer-updated `domains/gtfs_s/raw/` directory and won't see any snapshot the automated downloader publishes.
+
+This is a follow-up change once the downloader is proven to keep the symlink correct — not part of this implementation.
 
 ### 10. Scheduling
 
@@ -339,22 +372,22 @@ The general recovery posture: **on every run, before touching the network, clean
 
 Recorded here so the reasoning isn't lost, since each of these started as an open question in an earlier draft of this design:
 
-* **CKAN API access** (was open question 1) — resolved. The correct endpoint is `https://api.opentransportdata.swiss/ckan-api`, authenticated with a token + token hash issued under the same opentransportdata.swiss application as `GTFS_RT_API_TOKEN` (see `.env.example` and [§1](#1-version-detection)). The earlier `403` was against the wrong host, not a real auth blocker.
-* **Retention policy** (was open question 2) — resolved. Retain every snapshot indefinitely; storage lifecycle is an infrastructure concern, not the downloader's. See [§8](#8-retention).
-* **Downstream trigger on successful download** (was open question 4) — resolved for v1. The downloader does **not** automatically trigger the DuckDB/SQLMesh subset pipeline. It publishes a `verified` (archive-level) snapshot and advances `latest`; downstream automation is a later iteration. See [§6](#6-validation-archive-level-rust-this-design-vs-content-level-duckdbsqlmesh-downstream).
+* **CKAN API access** (was open question 1) — resolved. The correct endpoint is `https://api.opentransportdata.swiss/ckan-api`, authenticated with a bearer token issued under the same opentransportdata.swiss application as `GTFS_RT_API_TOKEN` (see `.env.example` and [§1](#1-version-detection)). The earlier `403` was against the wrong host, not a real auth blocker.
+* **Token/header wiring** (was open question, folded into the item above) — resolved. `Authorization: Bearer {GTFS_S_CKAN_API_TOKEN}` on the `package_show` request is sufficient; `GTFS_S_CKAN_API_TOKEN_HASH` is not required by this endpoint (still provisioned as part of the credential pair; see §1).
+* **Upstream-provided checksums** (was open question 2) — resolved. The CKAN resource metadata exposes a `hash` field, checked against our own `archive_sha256` when it's shaped like a hex SHA-256. See [§3](#3-metadata-schema).
+* **Retention policy** (was open question) — resolved. Retain every snapshot indefinitely; storage lifecycle is an infrastructure concern, not the downloader's. See [§8](#8-retention).
+* **Downstream trigger on successful download** (was open question) — resolved for v1. The downloader does **not** automatically trigger the DuckDB/SQLMesh subset pipeline. It publishes a `verified` (archive-level) snapshot and advances `latest`; downstream automation is a later iteration. See [§6](#6-validation-archive-level-rust-this-design-vs-content-level-duckdbsqlmesh-downstream).
 
 ## Open questions
 
 Still open:
 
-1. **Token/header wiring** — how exactly the CKAN API token and token hash are presented (headers vs. query params, exact header names) needs confirming against opentransportdata.swiss's CKAN API auth docs while implementing the HTTP client. Not a design blocker, just an implementation detail to nail down first.
-2. **Upstream-provided checksums** — does the CKAN resource metadata (now reachable via the correct endpoint) expose a hash we can verify against, or is `archive_sha256` only ever our own record of what we downloaded? Check once the client is talking to the real API.
-3. **Rust as a third platform language** — flagged under [Language & tooling boundary](#language--tooling-boundary): this deserves its own ADR (or an amendment to ADR 0010) before it's treated as settled precedent for future services.
-4. **SQLMesh adoption for the subset/derived-table stages** — flagged under [§6](#6-validation-archive-level-rust-this-design-vs-content-level-duckdbsqlmesh-downstream): this extends into ADR 0011's territory (which currently mandates Polars) and likely wants its own ADR rather than being decided as a side effect of this document.
-5. **Automatic Tier 2 (content) validation without full pipeline execution** — once both the downloader and the SQLMesh layer exist, is there a lightweight way to content-validate a new `latest` without running the full subset pipeline, to shrink the window where `latest` is archive-sound but content-unchecked? Not needed for v1 given the resolved no-auto-trigger decision, but worth a look once both halves exist.
+1. **Rust as a third platform language** — flagged under [Language & tooling boundary](#language--tooling-boundary): this deserves its own ADR (or an amendment to ADR 0010) before it's treated as settled precedent for future services.
+2. **SQLMesh adoption for the subset/derived-table stages** — flagged under [§6](#6-validation-archive-level-rust-this-design-vs-content-level-duckdbsqlmesh-downstream): this extends into ADR 0011's territory (which currently mandates Polars) and likely wants its own ADR rather than being decided as a side effect of this document.
+3. **Automatic Tier 2 (content) validation without full pipeline execution** — once both the downloader and the SQLMesh layer exist, is there a lightweight way to content-validate a new `latest` without running the full subset pipeline, to shrink the window where `latest` is archive-sound but content-unchecked? Not needed for v1 given the resolved no-auto-trigger decision, but worth a look once both halves exist.
 
 ---
 
 ## Next step
 
-Implement this design in the `ckan` crate under `domains/ingestion/` (§§1–7): CKAN-based version detection, the download → verify → extract → validate(archive) → publish pipeline, the manifest/sidecar scheme, symlink management, locking, and recovery. Open question 1 (token/header wiring) is the first thing to nail down once real API calls are being made.
+Implement this design in the `ckan` crate under `domains/ingestion/` (§§1–7): CKAN-based version detection, the download → verify → extract → validate(archive) → publish pipeline, the manifest/sidecar scheme, symlink management, locking, and recovery.
