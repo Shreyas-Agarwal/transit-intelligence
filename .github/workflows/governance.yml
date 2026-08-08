@@ -18,6 +18,9 @@ on:
     # --no-verify).
     - cron: "0 6 * * 1"
 
+permissions:
+  contents: read
+
 jobs:
   commit-policy:
     name: Conform (Conventional Commits + DCO)
