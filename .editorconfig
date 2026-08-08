@@ -1,18 +1,40 @@
 root = true
 
+# Extension -> style mapping only. No domain awareness here by design (see
+# ADR 0013): a domain that starts using an extension not yet listed should
+# add a section here, not restructure this file around "which domain uses
+# what."
+
 [*]
 charset = utf-8
 end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-[*.{ts,tsx,js,jsx}]
+[*.rs]
 indent_style = space
-indent_size = 2
+indent_size = 4
 
 [*.py]
 indent_style = space
 indent_size = 4
 
+[*.{ts,tsx,js,jsx}]
+indent_style = space
+indent_size = 2
+
+[*.sql]
+indent_style = space
+indent_size = 2
+
+[*.{toml,yml,yaml,json,json5,jsonc}]
+indent_style = space
+indent_size = 2
+
 [*.md]
+indent_style = space
+indent_size = 2
 trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

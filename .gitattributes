@@ -2,12 +2,16 @@
 * text=auto eol=lf
 
 # Source code
+*.rs text eol=lf
+*.py text eol=lf
+*.sql text eol=lf
+
+# No TypeScript/JS currently lives in this repository (ADR 0013), but a
+# domain is free to introduce it without this file needing domain awareness.
 *.ts text eol=lf
 *.tsx text eol=lf
 *.js text eol=lf
 *.jsx text eol=lf
-
-*.py text eol=lf
 
 *.json text eol=lf
 *.yaml text eol=lf
@@ -17,6 +21,14 @@
 *.md text eol=lf
 
 *.sh text eol=lf
+
+# Generated/vendored — not hand-authored, excluded from GitHub's language
+# statistics and from noisy line-by-line diffs. Not marked -merge: a naive
+# merge of a stale lockfile is still safer to resolve manually than to
+# silently pick one side, but a full diff on every bump isn't useful either.
+Cargo.lock linguist-generated=true -diff
+uv.lock linguist-generated=true -diff
+*.ipynb linguist-generated=true -diff
 
 # Windows scripts
 *.bat text eol=crlf
