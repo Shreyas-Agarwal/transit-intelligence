@@ -41,6 +41,16 @@ def run(mode: str = "latest") -> list[TransformResult]:
                 len(result.artifact_row_counts or {}),
                 result.silver_path,
             )
+            if result.graph_path is not None:
+                logger.info(
+                    "snapshot %s: wrote graph (%d nodes, %d edges) to %s",
+                    snapshot.version,
+                    (result.graph_row_counts or {}).get("nodes", 0),
+                    (result.graph_row_counts or {}).get("edges", 0),
+                    result.graph_path,
+                )
+            else:
+                logger.error("snapshot %s: graph construction failed, see above", snapshot.version)
         else:
             logger.error(
                 "snapshot %s failed validation:\n%s",

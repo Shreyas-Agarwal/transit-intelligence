@@ -41,9 +41,24 @@ def _tables(**extra: pl.DataFrame) -> dict[str, pl.DataFrame]:
     }
 
 
-def test_stops_filtered_by_zurich_prefix():
+def test_stops_keeps_every_row_and_classifies_stop_type():
     subset = build_zurich_subset(_tables())
-    assert sorted(subset.stops["stop_id"]) == ["Z1", "Z2"]
+    assert sorted(subset.stops["stop_id"]) == ["X1", "X2", "Z1", "Z2"]
+    stop_types = dict(zip(subset.stops["stop_id"], subset.stops["stop_type"], strict=True))
+    assert stop_types == {
+        "Z1": "internal",
+        "Z2": "internal",
+        # X1 is visited by T_CROSSING, which also visits an internal stop.
+        "X1": "boundary",
+        # X2 is only ever visited by T_IGNORED, which touches no internal stop.
+        "X2": "external",
+    }
+
+
+def test_internal_stops_matches_the_old_zurich_prefix_filter():
+    subset = build_zurich_subset(_tables())
+    assert sorted(subset.internal_stops["stop_id"]) == ["Z1", "Z2"]
+    assert "stop_type" not in subset.internal_stops.columns
 
 
 def test_trip_universe_excludes_trips_with_no_zurich_stop():

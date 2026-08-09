@@ -28,6 +28,7 @@
     "**/.DS_Store": true,
     "**/.pytest_cache": true,
     "**/__pycache__": true,
+    "**/.venv": true,
     "**/.ruff_cache": true,
     "**/.mypy_cache": true,
     "**/.sqlmesh": true,
@@ -38,6 +39,7 @@
   },
   "search.exclude": {
     "**/node_modules": true,
+    "**/.venv": true,
     "**/dist": true,
     "**/target": true,
     "**/.turbo": true,

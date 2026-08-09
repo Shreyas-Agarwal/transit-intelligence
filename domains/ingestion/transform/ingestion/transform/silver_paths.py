@@ -3,6 +3,11 @@ which itself mirrors `RawLayout` in domains/ingestion/extract/ckan/src/paths.rs)
 one directory per snapshot version, a `latest` symlink that only ever advances
 forward. Rooted at `data/silver/static` instead of `data/bronze/static`, and
 writable from this side since this stage produces it rather than just reading it.
+
+`SilverLayout` is deliberately root-agnostic — it takes whatever root it's
+given — so the graph output (`graph_root()`, `data/silver/graph`) reuses the
+exact same versioned-snapshot + `latest` machinery as the static output
+instead of a parallel implementation. Same layout, different root.
 """
 
 from __future__ import annotations
@@ -21,6 +26,19 @@ def silver_root() -> Path:
         return Path(silver_dir)
     repo_root = Path(__file__).resolve().parents[5]
     return repo_root / "data" / "silver" / "static"
+
+
+def graph_root() -> Path:
+    """`<repo_root>/data/silver/graph` by default, overridable with
+    `GTFS_S_SILVER_GRAPH_DIR` — same idea as `silver_root()`, just the graph
+    output's own root, kept separate from `data/silver/static` (ADR-free v1
+    graph output, alongside the static Silver layer rather than inside it).
+    """
+    graph_dir = os.environ.get("GTFS_S_SILVER_GRAPH_DIR")
+    if graph_dir:
+        return Path(graph_dir)
+    repo_root = Path(__file__).resolve().parents[5]
+    return repo_root / "data" / "silver" / "graph"
 
 
 class SilverLayout:

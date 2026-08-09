@@ -41,7 +41,9 @@ Two stages, two tools, run separately:
 2. **Transform** (`domains/ingestion/transform`, Python + Polars) — validates a Bronze snapshot's
    Parquet tables (required columns, row-count sanity, referential integrity),
    then derives the Zurich operational subset (ADR 0011) and publishes it to
-   `data/silver/static/<version>/`, with its own `latest` symlink.
+   `data/silver/static/<version>/`, with its own `latest` symlink; and, from
+   that same snapshot, derives the canonical transit graph and publishes it
+   to `data/silver/graph/<version>/`, with its own separate `latest` symlink.
 
 ```text
 data/bronze/static/
@@ -157,13 +159,26 @@ uv run python -m ingestion.transform replay
 
 For each snapshot processed: Bronze's Parquet tables are validated (missing column, out-of-range
 row count, orphaned foreign key, out-of-bounds coordinate — logged per failing check); a snapshot
-that fails validation gets **no** Silver output. A snapshot that passes gets the Zurich
-subset/derived tables written to `data/silver/static/<version>/`, with `data/silver/static/latest`
-advanced to match — same directory-per-version + `latest`-symlink convention as Bronze. Exit code
-is non-zero if any processed snapshot failed validation.
+that fails validation gets **no** Silver output (neither static nor graph). A snapshot that passes
+gets the Zurich subset/derived tables written to `data/silver/static/<version>/`, with
+`data/silver/static/latest` advanced to match — same directory-per-version + `latest`-symlink
+convention as Bronze — and the canonical transit graph (`nodes.parquet`, `edges.parquet`) written
+to `data/silver/graph/<version>/`, with its own separate `data/silver/graph/latest`. Graph
+construction is isolated from the static output: a graph failure is logged but never rolls back or
+blocks the already-written static Silver output for that version, and never leaves
+`data/silver/graph/latest` pointing at a partially-written version. Exit code is non-zero if any
+processed snapshot failed validation.
 
-See `domains/ingestion/transform/README.md` for the full artifact list and the Python API
-equivalent (`from ingestion import transform; transform.run(mode=...)`).
+Check what a run produced:
+
+```bash
+readlink data/silver/static/latest
+readlink data/silver/graph/latest
+```
+
+See `domains/ingestion/transform/README.md` for the full artifact list (including the canonical
+graph model — what's a node, what's an edge, how `internal`/`boundary`/`external` stops are
+handled) and the Python API equivalent (`from ingestion import transform; transform.run(mode=...)`).
 
 ---
 

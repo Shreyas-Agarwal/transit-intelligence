@@ -115,3 +115,8 @@ def bronze_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def silver_root(tmp_path: Path) -> Path:
     return tmp_path / "silver" / "static"
+
+
+@pytest.fixture
+def graph_root(tmp_path: Path) -> Path:
+    return tmp_path / "silver" / "graph"

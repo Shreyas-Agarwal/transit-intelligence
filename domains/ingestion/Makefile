@@ -4,7 +4,9 @@
 #
 # The Rust workspace lives in extract/ (rust-toolchain.toml stays at this
 # level so it still applies to that workspace). The Bronze -> Silver
-# transform pipeline lives in transform/ (plain Python + uv).
+# transform pipeline lives in transform/ (plain Python + uv) — it produces
+# both the static Silver subset (data/silver/static) and the canonical
+# transit graph (data/silver/graph); transform-test covers both.
 
 .PHONY: ci fmt lint test sync transform-sync transform-lint transform-typecheck transform-test
 
