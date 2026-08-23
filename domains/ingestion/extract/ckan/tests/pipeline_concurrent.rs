@@ -435,7 +435,7 @@ fn concurrent_workers_use_isolated_staging_paths() {
         std::fs::read_dir(path)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |x| x == "parquet"))
+            .filter(|e| e.path().extension().is_some_and(|x| x == "parquet"))
             .count()
     };
     assert!(

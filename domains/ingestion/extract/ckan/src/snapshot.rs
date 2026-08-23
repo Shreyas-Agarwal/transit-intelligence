@@ -298,6 +298,27 @@ fn is_conversion_complete(extract_staging: &Path, parquet_staging: &Path) -> boo
     })
 }
 
+/// Awaits `fut`, marking `span` as errored (see
+/// `ti_common::observability::mark_span_error`) if it resolves to `Err` —
+/// the "run this stage's future, and if it fails, record that failure on
+/// its own span" pattern every stage below needs, written once rather than
+/// once per stage. Stage-specific cleanup (removing a partial download,
+/// discarding a bad extraction, ...) still happens at each call site, since
+/// that's the one part that genuinely differs stage to stage.
+async fn instrumented_stage<F, T, E>(span: &tracing::Span, fut: F) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match fut.await {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            ti_common::observability::mark_span_error(span, e.to_string());
+            Err(e)
+        }
+    }
+}
+
 /// Stages 2 through 7: download the archive to disposable staging (or reuse
 /// one already there), verify it, extract and validate it (or reuse an
 /// already-valid extraction), convert it to Parquet (or reuse an
@@ -349,24 +370,20 @@ async fn run_stages(
     let outcome = match resume {
         ResumePoint::FromScratch => {
             let download_span = tracing::info_span!("download");
-            let outcome = match permits
-                .with_download_permit(|| {
-                    download::download_to_staging(
-                        http,
-                        &resource.download_url,
-                        &part_path,
-                        &zip_path,
-                    )
-                })
-                .instrument(download_span.clone())
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    ti_common::observability::mark_span_error(&download_span, e.to_string());
-                    return Err(e.into());
-                }
-            };
+            let outcome = instrumented_stage(
+                &download_span,
+                permits
+                    .with_download_permit(|| {
+                        download::download_to_staging(
+                            http,
+                            &resource.download_url,
+                            &part_path,
+                            &zip_path,
+                        )
+                    })
+                    .instrument(download_span.clone()),
+            )
+            .await?;
             tracing::info!(
                 version = %resource.version,
                 bytes = outcome.bytes,
@@ -411,19 +428,17 @@ async fn run_stages(
         let zip = zip_path.clone();
         let extract = extract_staging.clone();
         let extract_span = tracing::info_span!("extract");
-        let join_result = permits
-            .with_processing_permit(move || {
-                tokio::task::spawn_blocking(move || archive::validate_and_extract(&zip, &extract))
-            })
-            .instrument(extract_span.clone())
-            .await;
-        let result = match join_result {
-            Ok(result) => result,
-            Err(e) => {
-                ti_common::observability::mark_span_error(&extract_span, e.to_string());
-                return Err(e.into());
-            }
-        };
+        let result = instrumented_stage(
+            &extract_span,
+            permits
+                .with_processing_permit(move || {
+                    tokio::task::spawn_blocking(move || {
+                        archive::validate_and_extract(&zip, &extract)
+                    })
+                })
+                .instrument(extract_span.clone()),
+        )
+        .await?;
         if let Err(e) = result {
             ti_common::observability::mark_span_error(&extract_span, e.to_string());
             let _ = std::fs::remove_file(&zip_path);
@@ -441,21 +456,17 @@ async fn run_stages(
         let csv_dir = extract_staging.clone();
         let pq_dir = parquet_staging.clone();
         let convert_span = tracing::info_span!("convert");
-        let join_result = permits
-            .with_processing_permit(move || {
-                tokio::task::spawn_blocking(move || {
-                    parquet_convert::convert_directory(&csv_dir, &pq_dir)
+        let result = instrumented_stage(
+            &convert_span,
+            permits
+                .with_processing_permit(move || {
+                    tokio::task::spawn_blocking(move || {
+                        parquet_convert::convert_directory(&csv_dir, &pq_dir)
+                    })
                 })
-            })
-            .instrument(convert_span.clone())
-            .await;
-        let result = match join_result {
-            Ok(result) => result,
-            Err(e) => {
-                ti_common::observability::mark_span_error(&convert_span, e.to_string());
-                return Err(e.into());
-            }
-        };
+                .instrument(convert_span.clone()),
+        )
+        .await?;
         if let Err(e) = result {
             ti_common::observability::mark_span_error(&convert_span, e.to_string());
             let _ = std::fs::remove_file(&zip_path);

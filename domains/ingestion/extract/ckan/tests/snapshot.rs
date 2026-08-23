@@ -761,3 +761,94 @@ async fn resuming_does_not_leave_duplicate_or_stray_staging_artifacts() {
     assert!(!layout.staging_extract_dir(dir_name).exists());
     assert!(!layout.staging_parquet_dir(dir_name).exists());
 }
+
+// ---------------------------------------------------------------------------
+// Implementation plan Phase 9 — reliability & failure-mode hardening
+// ---------------------------------------------------------------------------
+
+/// A resource whose recorded upstream hash doesn't match the archive's real
+/// content is rejected at Verify — before Extract ever runs — and the
+/// now-untrusted archive is not left behind on disk. Implementation plan
+/// Phase 9's "checksum mismatch" failure mode.
+#[tokio::test]
+async fn a_hash_mismatch_is_rejected_and_the_untrusted_archive_is_cleaned_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let url = serve_one_response(build_valid_zip_bytes()).await;
+    let mut resource = resource("20260805", url.clone());
+    // Well-formed SHA-256 shape (64 hex chars) so it's actually compared,
+    // not skipped as unrecognizable — and guaranteed not to match the real
+    // archive's hash.
+    resource.upstream_hash = Some("f".repeat(64));
+    let dir_name = resource.snapshot_dir_name();
+    let work = queued_work("20260805", &url);
+    let http = reqwest::Client::new();
+    let permits = ResourcePermits::new(4, 4);
+
+    let outcome = process_snapshot(&http, &layout, &resource, &permits, work, None).await;
+
+    let err = outcome
+        .meta
+        .expect_err("a checksum mismatch must fail the version");
+    assert!(
+        err.contains("does not match"),
+        "expected a hash-mismatch message, got: {err}"
+    );
+    assert_eq!(outcome.work.state, WorkState::Failed);
+    assert!(
+        !layout.staging_zip_path(&dir_name).exists(),
+        "the untrusted archive must not be left behind"
+    );
+    assert!(
+        !layout.final_dir(&dir_name).exists(),
+        "a hash-mismatched archive must never be published"
+    );
+}
+
+/// A crash between the atomic rename and the sidecar write (design doc §12,
+/// row 3) leaves a snapshot directory with no sidecar behind. Elsewhere
+/// (`manifest_recovery::snapshot_directory_without_sidecar_is_not_treated_as_installed`)
+/// proves such a directory isn't mistaken for installed; this proves the
+/// other half of the recovery story end to end: reprocessing that same
+/// version from scratch actually succeeds and replaces it, rather than
+/// tripping over the leftover directory. Implementation plan Phase 9's
+/// "process crash during publication" failure mode.
+#[tokio::test]
+async fn a_directory_left_without_a_sidecar_is_cleanly_overwritten_by_reprocessing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let url = serve_one_response(build_valid_zip_bytes()).await;
+    let resource = resource("20260805", url.clone());
+    let dir_name = resource.snapshot_dir_name();
+
+    // Simulate exactly the crash point: the final directory exists (the
+    // rename already happened) but nothing else has — no sidecar, and some
+    // stale content that must not survive reprocessing.
+    let final_dir = layout.final_dir(&dir_name);
+    std::fs::create_dir_all(&final_dir).unwrap();
+    std::fs::write(final_dir.join("stale_leftover.txt"), b"from a crashed run").unwrap();
+
+    let work = queued_work("20260805", &url);
+    let http = reqwest::Client::new();
+    let permits = ResourcePermits::new(4, 4);
+
+    let outcome = process_snapshot(&http, &layout, &resource, &permits, work, None).await;
+
+    outcome
+        .meta
+        .expect("reprocessing must succeed and overwrite the orphaned directory");
+    assert_eq!(outcome.work.state, WorkState::Published);
+    assert!(
+        final_dir.join(".snapshot-meta.json").exists(),
+        "a sidecar must now exist"
+    );
+    assert!(
+        !final_dir.join("stale_leftover.txt").exists(),
+        "stale leftover content must not survive reprocessing"
+    );
+    assert!(final_dir.join("stops.parquet").exists());
+}

@@ -155,4 +155,32 @@ mod tests {
         let newer = VersionId::parse("20260805").unwrap();
         assert!(older < newer);
     }
+
+    #[test]
+    fn verify_upstream_hash_passes_when_no_hash_was_published() {
+        assert!(verify_upstream_hash(None, "anything").is_ok());
+    }
+
+    #[test]
+    fn verify_upstream_hash_passes_when_hashes_match_case_insensitively() {
+        let lower = "a".repeat(64);
+        let upper = lower.to_uppercase();
+        assert!(verify_upstream_hash(Some(&upper), &lower).is_ok());
+    }
+
+    #[test]
+    fn verify_upstream_hash_fails_when_hashes_differ() {
+        let published = "a".repeat(64);
+        let computed = "b".repeat(64);
+        let err = verify_upstream_hash(Some(&published), &computed).unwrap_err();
+        assert!(err.contains(&published) && err.contains(&computed));
+    }
+
+    #[test]
+    fn verify_upstream_hash_ignores_a_value_not_shaped_like_sha256() {
+        // Wrong length: not a SHA-256 at all (maybe a different algorithm).
+        assert!(verify_upstream_hash(Some("deadbeef"), "anything").is_ok());
+        // Right length, but not hex.
+        assert!(verify_upstream_hash(Some(&"z".repeat(64)), "anything").is_ok());
+    }
 }
