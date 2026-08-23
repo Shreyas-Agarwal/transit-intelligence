@@ -19,4 +19,5 @@ pub mod queue;
 pub mod reconcile;
 pub mod snapshot;
 pub mod symlink;
+pub mod telemetry;
 pub mod work_state;

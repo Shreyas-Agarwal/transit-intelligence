@@ -9,6 +9,7 @@ pub mod auth;
 pub mod config;
 pub mod http;
 pub mod logging;
+pub mod observability;
 pub mod retry;
 
 pub use config::ConfigError;

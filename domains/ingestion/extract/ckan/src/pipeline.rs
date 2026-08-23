@@ -59,6 +59,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use tracing::Instrument as _;
 
 use crate::archive::ArchiveError;
 use crate::ckan_client::{CkanClient, CkanClientError};
@@ -73,6 +74,7 @@ use crate::queue::{self, QueueConfig};
 use crate::reconcile;
 use crate::snapshot::{self, ProcessOutcome};
 use crate::symlink::{self, SymlinkError};
+use crate::telemetry::Metrics;
 use crate::work_state::{self, VersionWork};
 
 #[derive(Debug, thiserror::Error)]
@@ -216,6 +218,32 @@ fn format_duration(elapsed: Duration) -> String {
 /// Safe to run repeatedly on a schedule (design doc §10) and safe to have been
 /// killed mid-run last time (§12) — every run starts by re-establishing a
 /// clean, self-consistent state before touching the network.
+///
+/// # Observability (implementation plan Phase 7)
+///
+/// This whole function is one OpenTelemetry trace, rooted at an `invocation`
+/// span. Discovery and reconciliation are their own child spans; every
+/// eligible version gets its own `version` span (a child of a `processing`
+/// span covering the whole concurrent phase), and each pipeline stage
+/// (`download`/`verify`/`extract`/`convert`/`publish`, in `crate::snapshot`)
+/// is in turn a child of that version's span — so one exported trace shows
+/// exactly where a run's wall-clock time went, down to a single stage of a
+/// single version, without needing a separate hand-rolled timing struct.
+/// Run-level counts (discovered/queued/published/failed/bytes) and
+/// distributions (queue wait, per-version duration) are recorded as
+/// `crate::telemetry::Metrics` alongside the spans — a span answers "how
+/// long did this take, this run"; a metric answers "how does this number
+/// behave in aggregate, across many runs."
+#[tracing::instrument(
+    name = "invocation",
+    skip_all,
+    fields(
+        max_concurrent_versions = concurrency.max_concurrent_versions,
+        max_queued_versions = concurrency.max_queued_versions,
+        max_concurrent_downloads = concurrency.max_concurrent_downloads,
+        max_concurrent_processing = concurrency.max_concurrent_processing,
+    )
+)]
 pub async fn run(
     layout: &RawLayout,
     ckan_client: &CkanClient,
@@ -230,6 +258,7 @@ pub async fn run(
         max_concurrent_processing,
     } = concurrency;
     let started_at = Instant::now();
+    let metrics = Metrics::new();
     std::fs::create_dir_all(layout.root())?;
 
     let lock = UpdaterLock::acquire(layout.lock_path())?;
@@ -249,8 +278,12 @@ pub async fn run(
 
     let work_states = work_state::scan_work_states(layout);
 
-    let resources = ckan_client.list_gtfs_zip_resources().await?;
+    let resources = ckan_client
+        .list_gtfs_zip_resources()
+        .instrument(tracing::info_span!("discovery"))
+        .await?;
     let discovered = resources.len();
+    metrics.versions_discovered.add(discovered as u64, &[]);
     tracing::info!(discovered, "discovered upstream GTFS-S resources");
 
     let already_present = resources
@@ -259,13 +292,18 @@ pub async fn run(
         .filter(|r| installed.contains_key(&r.version))
         .count();
 
-    let reconciled = reconcile::reconcile(
-        &resources,
-        cutoff_version,
-        &installed,
-        work_states,
-        Utc::now(),
-    );
+    let reconciled = tracing::info_span!("reconciliation").in_scope(|| {
+        reconcile::reconcile(
+            &resources,
+            cutoff_version,
+            &installed,
+            work_states,
+            Utc::now(),
+        )
+    });
+    metrics
+        .stale_running_recovered
+        .add(reconciled.recovered_from_stale_running.len() as u64, &[]);
     for work in reconciled.states.values() {
         if let Err(e) = work_state::write_work_state(layout, work) {
             tracing::warn!(version = %work.version, error = %e, "failed to persist reconciled work state");
@@ -295,6 +333,7 @@ pub async fn run(
     );
 
     let attempted = reconciled.eligible.len();
+    metrics.versions_queued.add(attempted as u64, &[]);
     let mut states = reconciled.states;
     let mut failed_this_run: BTreeMap<VersionId, ()> = BTreeMap::new();
 
@@ -325,19 +364,32 @@ pub async fn run(
     // Independent of the worker-pool size above: Download draws from one
     // limit, Extract/Convert share a second — see crate::concurrency.
     let permits = ResourcePermits::new(max_concurrent_downloads, max_concurrent_processing);
+    // Parent span for every version processed this run — see this
+    // function's doc comment. Kept alive by the worker closure below (its
+    // last clone is dropped once every worker has exited), so its exported
+    // duration covers the whole concurrent phase, not just its creation
+    // instant.
+    let processing_span = tracing::info_span!("processing");
 
+    // The item type carried through the queue is `(VersionId, Instant)`, not
+    // just `VersionId` — the enqueue timestamp, so a worker can tell how
+    // long its item actually waited before being picked up (Phase 7's queue
+    // wait metric). `crate::queue` stays domain- and telemetry-blind; this
+    // is just what this call site chooses to put in the generic item slot.
     let (work_queue, mut results_rx, mut workers) = {
         let http = download_http.clone();
         let layout = layout.clone();
         let resources_by_version = Arc::clone(&resources_by_version);
         let states_snapshot = Arc::clone(&states_snapshot);
         let permits = permits.clone();
+        let processing_span = processing_span.clone();
+        let metrics = metrics.clone();
         queue::spawn(
             QueueConfig {
                 max_queued: max_queued.max(1),
                 max_active: max_concurrent.max(1),
             },
-            move |version: VersionId| {
+            move |(version, enqueued_at): (VersionId, Instant)| {
                 let http = http.clone();
                 let layout = layout.clone();
                 let permits = permits.clone();
@@ -350,10 +402,36 @@ pub async fn run(
                     .cloned()
                     .expect("a queued version must have a control-plane record from reconcile()");
                 let worker_id = Some(worker_id.clone());
+                let metrics = metrics.clone();
+
+                metrics
+                    .queue_wait_seconds
+                    .record(enqueued_at.elapsed().as_secs_f64(), &[]);
+                let version_span = tracing::info_span!(
+                    parent: &processing_span,
+                    "version",
+                    version = %resource.version,
+                    resume_stage = tracing::field::Empty,
+                );
+
                 async move {
-                    snapshot::process_snapshot(&http, &layout, &resource, &permits, work, worker_id)
-                        .await
+                    metrics.active_workers.add(1, &[]);
+                    let version_started = Instant::now();
+                    // `process_snapshot` marks its own current span (this
+                    // `version` span, since it's the one `.instrument()`s
+                    // this whole future) as errored on failure — see its Stage
+                    // 8 (Complete) implementation.
+                    let outcome = snapshot::process_snapshot(
+                        &http, &layout, &resource, &permits, work, worker_id,
+                    )
+                    .await;
+                    metrics
+                        .version_duration_seconds
+                        .record(version_started.elapsed().as_secs_f64(), &[]);
+                    metrics.active_workers.add(-1, &[]);
+                    outcome
                 }
+                .instrument(version_span)
             },
         )
     };
@@ -364,24 +442,29 @@ pub async fn run(
     let eligible = reconciled.eligible;
     let producer = tokio::spawn(async move {
         for version in eligible {
-            if work_queue.enqueue(version).await.is_err() {
+            if work_queue.enqueue((version, Instant::now())).await.is_err() {
                 break; // every worker has already exited; nothing left to feed
             }
         }
         work_queue.close();
     });
 
-    while let Some((_version, outcome)) = results_rx.recv().await {
+    while let Some((_item, outcome)) = results_rx.recv().await {
         let ProcessOutcome { work, meta } = outcome;
         let version = work.version.clone();
         states.insert(version.clone(), work);
         match meta {
             Ok(snapshot_meta) => {
                 tracing::info!(%version, "version verified and published");
+                metrics.versions_published.add(1, &[]);
+                metrics
+                    .bytes_downloaded
+                    .add(snapshot_meta.archive_size_bytes, &[]);
                 installed.insert(version, snapshot_meta);
             }
             Err(e) => {
                 tracing::error!(%version, error = %e, "version failed; will retry next run");
+                metrics.versions_failed.add(1, &[]);
                 failed_this_run.insert(version, ());
             }
         }
@@ -391,6 +474,7 @@ pub async fn run(
     while let Some(res) = workers.join_next().await {
         res?; // propagates a worker task panic
     }
+    drop(processing_span); // every worker has exited; the span's work is done
     // -------------------------------------------------------------------------
 
     advance_latest_if_needed(layout, &installed)?;

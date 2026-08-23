@@ -33,6 +33,13 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# observability (OpenTelemetry-compatible tracing/metrics; bootstrap lives in
+# ti-common::observability, domain-specific spans/metrics live in each crate)
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["trace", "metrics"] }
+opentelemetry-stdout = { version = "0.32", features = ["trace", "metrics"] }
+tracing-opentelemetry = "0.33"
+
 # configuration
 config = "0.15"
 

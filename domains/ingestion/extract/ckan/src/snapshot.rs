@@ -78,6 +78,7 @@
 use std::path::Path;
 
 use chrono::Utc;
+use tracing::Instrument as _;
 
 use crate::archive;
 use crate::concurrency::ResourcePermits;
@@ -125,6 +126,7 @@ pub async fn process_snapshot(
             error = %e,
             "cannot claim a version that reconcile() did not hand out as QUEUED; this is a bug in the caller, not a runtime condition"
         );
+        ti_common::observability::mark_span_error(&tracing::Span::current(), e.to_string());
         return ProcessOutcome {
             work,
             meta: Err(e.to_string()),
@@ -149,6 +151,7 @@ pub async fn process_snapshot(
         }
         Err(e) => {
             let message = e.to_string();
+            ti_common::observability::mark_span_error(&tracing::Span::current(), message.as_str());
             work.fail(message.clone(), now)
                 .expect("RUNNING -> FAILED is always valid after a failed run");
             persist(layout, &work);
@@ -234,6 +237,21 @@ fn find_resume_point(
     ResumePoint::Extracted(outcome)
 }
 
+impl ResumePoint {
+    /// A short label for the "version" span (implementation plan Phase 7),
+    /// recorded once `find_resume_point` has decided — so a trace can answer
+    /// "how much of this version's work was actually redone" without
+    /// needing a separate metric alongside the span.
+    fn label(&self) -> &'static str {
+        match self {
+            ResumePoint::FromScratch => "from_scratch",
+            ResumePoint::Downloaded(_) => "downloaded",
+            ResumePoint::Extracted(_) => "extracted",
+            ResumePoint::Converted(_) => "converted",
+        }
+    }
+}
+
 /// Whether `parquet_staging` is a fully completed conversion of
 /// `extract_staging`.
 ///
@@ -308,6 +326,7 @@ async fn run_stages(
         ResumePoint::Extracted(_) => (false, false, true),
         ResumePoint::Converted(_) => (false, false, false),
     };
+    tracing::Span::current().record("resume_stage", resume.label());
     tracing::info!(
         version = %resource.version,
         need_download, need_extract, need_convert,
@@ -329,7 +348,8 @@ async fn run_stages(
     let downloaded_at = Utc::now();
     let outcome = match resume {
         ResumePoint::FromScratch => {
-            let outcome = permits
+            let download_span = tracing::info_span!("download");
+            let outcome = match permits
                 .with_download_permit(|| {
                     download::download_to_staging(
                         http,
@@ -338,7 +358,15 @@ async fn run_stages(
                         &zip_path,
                     )
                 })
-                .await?;
+                .instrument(download_span.clone())
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    ti_common::observability::mark_span_error(&download_span, e.to_string());
+                    return Err(e.into());
+                }
+            };
             tracing::info!(
                 version = %resource.version,
                 bytes = outcome.bytes,
@@ -365,11 +393,16 @@ async fn run_stages(
     // (byte count against Content-Length already checked inside
     // `download_to_staging` for a fresh download; a resumed archive is
     // re-hashed above from its real, current bytes either way.)
-    if let Err(reason) =
-        crate::domain::verify_upstream_hash(resource.upstream_hash.as_deref(), &outcome.sha256)
     {
-        let _ = std::fs::remove_file(&zip_path);
-        return Err(PipelineError::HashMismatch(reason));
+        let verify_span = tracing::info_span!("verify");
+        let _entered = verify_span.enter();
+        if let Err(reason) =
+            crate::domain::verify_upstream_hash(resource.upstream_hash.as_deref(), &outcome.sha256)
+        {
+            ti_common::observability::mark_span_error(&verify_span, reason.as_str());
+            let _ = std::fs::remove_file(&zip_path);
+            return Err(PipelineError::HashMismatch(reason));
+        }
     }
 
     // -- Stages 4-5: Extract + Validate (bounded by the processing permit pool) --
@@ -377,12 +410,22 @@ async fn run_stages(
         std::fs::create_dir_all(&extract_staging)?;
         let zip = zip_path.clone();
         let extract = extract_staging.clone();
-        let result = permits
+        let extract_span = tracing::info_span!("extract");
+        let join_result = permits
             .with_processing_permit(move || {
                 tokio::task::spawn_blocking(move || archive::validate_and_extract(&zip, &extract))
             })
-            .await?;
+            .instrument(extract_span.clone())
+            .await;
+        let result = match join_result {
+            Ok(result) => result,
+            Err(e) => {
+                ti_common::observability::mark_span_error(&extract_span, e.to_string());
+                return Err(e.into());
+            }
+        };
         if let Err(e) = result {
+            ti_common::observability::mark_span_error(&extract_span, e.to_string());
             let _ = std::fs::remove_file(&zip_path);
             let _ = std::fs::remove_dir_all(&extract_staging);
             return Err(e.into());
@@ -397,14 +440,24 @@ async fn run_stages(
         std::fs::create_dir_all(&parquet_staging)?;
         let csv_dir = extract_staging.clone();
         let pq_dir = parquet_staging.clone();
-        let result = permits
+        let convert_span = tracing::info_span!("convert");
+        let join_result = permits
             .with_processing_permit(move || {
                 tokio::task::spawn_blocking(move || {
                     parquet_convert::convert_directory(&csv_dir, &pq_dir)
                 })
             })
-            .await?;
+            .instrument(convert_span.clone())
+            .await;
+        let result = match join_result {
+            Ok(result) => result,
+            Err(e) => {
+                ti_common::observability::mark_span_error(&convert_span, e.to_string());
+                return Err(e.into());
+            }
+        };
         if let Err(e) = result {
+            ti_common::observability::mark_span_error(&convert_span, e.to_string());
             let _ = std::fs::remove_file(&zip_path);
             let _ = std::fs::remove_dir_all(&extract_staging);
             let _ = std::fs::remove_dir_all(&parquet_staging);
@@ -419,15 +472,23 @@ async fn run_stages(
     }
 
     // -- Stage 7: Publish -------------------------------------------------------
+    let publish_span = tracing::info_span!("publish");
+    let _entered = publish_span.enter();
     let final_dir = layout.final_dir(&dir_name);
     if final_dir.exists() {
         tracing::warn!(
             dir = %final_dir.display(),
             "overwriting pre-existing directory with no sidecar using freshly validated snapshot"
         );
-        std::fs::remove_dir_all(&final_dir)?;
+        if let Err(e) = std::fs::remove_dir_all(&final_dir) {
+            ti_common::observability::mark_span_error(&publish_span, e.to_string());
+            return Err(e.into());
+        }
     }
-    std::fs::rename(&parquet_staging, &final_dir)?;
+    if let Err(e) = std::fs::rename(&parquet_staging, &final_dir) {
+        ti_common::observability::mark_span_error(&publish_span, e.to_string());
+        return Err(e.into());
+    }
     let _ = std::fs::remove_file(&zip_path);
 
     let meta = SnapshotMeta {
@@ -444,7 +505,10 @@ async fn run_stages(
         extract_path: final_dir.to_string_lossy().to_string(),
         status: SidecarStatus::Verified,
     };
-    manifest::write_sidecar(layout, &dir_name, &meta)?;
+    if let Err(e) = manifest::write_sidecar(layout, &dir_name, &meta) {
+        ti_common::observability::mark_span_error(&publish_span, e.to_string());
+        return Err(e.into());
+    }
 
     Ok(meta)
 }

@@ -31,10 +31,19 @@
 //! actually measures anything. `ckan::config` defaults both new settings to
 //! whatever `MAX_CONCURRENT_VERSIONS` already is, so an operator who never
 //! touches the two new environment variables sees no behavior change at all.
+//!
+//! Phase 7 adds one more thing: each pool reports how many permits are
+//! currently in use as an OpenTelemetry gauge-like counter, so "how much of
+//! the configured download/processing concurrency is actually being used"
+//! is answered by a metric, not just by reading the configured limit. This
+//! module records its own utilization — that's what it manages — but knows
+//! nothing about GTFS, spans, or why the permits exist; see `ckan::telemetry`
+//! for the pipeline-level metrics built on top.
 
 use std::future::Future;
 use std::sync::Arc;
 
+use opentelemetry::metrics::UpDownCounter;
 use tokio::sync::Semaphore;
 
 /// Two independent resource pools, shared by every worker in a run. Cheap to
@@ -45,13 +54,47 @@ use tokio::sync::Semaphore;
 pub struct ResourcePermits {
     download: Arc<Semaphore>,
     processing: Arc<Semaphore>,
+    download_in_use: UpDownCounter<i64>,
+    processing_in_use: UpDownCounter<i64>,
+}
+
+/// Decrements `counter` when dropped — released on every exit path (normal
+/// return, early error return, or the holding task being cancelled) the same
+/// way the semaphore permit itself is, since both are just values going out
+/// of scope.
+struct InUseGuard<'a> {
+    counter: &'a UpDownCounter<i64>,
+}
+
+impl<'a> InUseGuard<'a> {
+    fn enter(counter: &'a UpDownCounter<i64>) -> Self {
+        counter.add(1, &[]);
+        Self { counter }
+    }
+}
+
+impl Drop for InUseGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.add(-1, &[]);
+    }
 }
 
 impl ResourcePermits {
     pub fn new(max_concurrent_downloads: usize, max_concurrent_processing: usize) -> Self {
+        let meter = opentelemetry::global::meter("ckan");
         Self {
             download: Arc::new(Semaphore::new(max_concurrent_downloads.max(1))),
             processing: Arc::new(Semaphore::new(max_concurrent_processing.max(1))),
+            download_in_use: meter
+                .i64_up_down_counter("gtfs_s.concurrency.download_permits_in_use")
+                .with_description("downloads currently in flight, out of the configured limit")
+                .build(),
+            processing_in_use: meter
+                .i64_up_down_counter("gtfs_s.concurrency.processing_permits_in_use")
+                .with_description(
+                    "extract/convert stages currently running, out of the configured limit",
+                )
+                .build(),
         }
     }
 
@@ -80,6 +123,7 @@ impl ResourcePermits {
             .acquire()
             .await
             .expect("download permit pool is never closed");
+        let _in_use = InUseGuard::enter(&self.download_in_use);
         f().await
     }
 
@@ -96,6 +140,7 @@ impl ResourcePermits {
             .acquire()
             .await
             .expect("processing permit pool is never closed");
+        let _in_use = InUseGuard::enter(&self.processing_in_use);
         f().await
     }
 }
