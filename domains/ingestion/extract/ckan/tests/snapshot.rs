@@ -6,6 +6,7 @@
 
 use std::io::Write as _;
 
+use ckan::concurrency::ResourcePermits;
 use ckan::domain::{UpstreamResource, VersionId};
 use ckan::paths::RawLayout;
 use ckan::snapshot::process_snapshot;
@@ -104,11 +105,13 @@ async fn full_pipeline_download_through_publish_succeeds() {
     let resource = resource("20260805", url.clone());
     let work = queued_work("20260805", &url);
     let http = reqwest::Client::new();
+    let permits = ResourcePermits::new(4, 4);
 
     let outcome = process_snapshot(
         &http,
         &layout,
         &resource,
+        &permits,
         work,
         Some("test-worker".to_string()),
     )
@@ -158,8 +161,9 @@ async fn a_structurally_invalid_archive_fails_and_records_failure() {
     let resource = resource("20260805", url.clone());
     let work = queued_work("20260805", &url);
     let http = reqwest::Client::new();
+    let permits = ResourcePermits::new(4, 4);
 
-    let outcome = process_snapshot(&http, &layout, &resource, work, None).await;
+    let outcome = process_snapshot(&http, &layout, &resource, &permits, work, None).await;
 
     assert!(outcome.meta.is_err());
     assert_eq!(outcome.work.state, WorkState::Failed);
@@ -186,8 +190,9 @@ async fn a_download_failure_is_recorded_as_failed_not_left_running() {
     let resource = resource("20260805", "http://127.0.0.1:0/fixture.zip".to_string());
     let work = queued_work("20260805", &resource.download_url);
     let http = reqwest::Client::new();
+    let permits = ResourcePermits::new(4, 4);
 
-    let outcome = process_snapshot(&http, &layout, &resource, work, None).await;
+    let outcome = process_snapshot(&http, &layout, &resource, &permits, work, None).await;
 
     assert!(outcome.meta.is_err());
     assert_eq!(outcome.work.state, WorkState::Failed);
@@ -213,7 +218,16 @@ async fn claiming_a_non_queued_version_is_rejected_without_processing() {
         resource.download_url.clone(),
     );
 
-    let outcome = process_snapshot(&reqwest::Client::new(), &layout, &resource, work, None).await;
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
 
     assert!(outcome.meta.is_err());
     assert_eq!(
@@ -221,4 +235,37 @@ async fn claiming_a_non_queued_version_is_rejected_without_processing() {
         WorkState::Discovered,
         "an invalid claim must not silently mutate state or attempt processing"
     );
+}
+
+/// Two full real pipeline runs, sharing one tightly-capped `ResourcePermits`
+/// (capacity 1 for both pools), run one after another: if either the
+/// Download permit or the processing permit leaked (never released), the
+/// second run would starve. Proves the Phase 5 wiring — not just the
+/// mechanism in isolation (see `concurrency::tests`) — doesn't leak permits
+/// across a real download → verify → extract → validate → convert → publish
+/// pass.
+#[tokio::test]
+async fn permits_are_not_leaked_across_real_pipeline_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+    let permits = ResourcePermits::new(1, 1);
+    let http = reqwest::Client::new();
+
+    for version in ["20260805", "20260812"] {
+        let url = serve_one_response(build_valid_zip_bytes()).await;
+        let resource = resource(version, url.clone());
+        let work = queued_work(version, &url);
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            process_snapshot(&http, &layout, &resource, &permits, work, None),
+        )
+        .await
+        .expect("a leaked permit would hang this call forever; it must not");
+
+        assert!(outcome.meta.is_ok(), "each run must still succeed");
+        assert_eq!(permits.available_download_permits(), 1);
+        assert_eq!(permits.available_processing_permits(), 1);
+    }
 }

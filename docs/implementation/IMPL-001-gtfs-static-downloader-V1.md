@@ -490,4 +490,87 @@ Feeding the queue and reading its results back happen at the same time, in paral
 
 ---
 
-**WAITING FOR APPROVAL** to begin Phase 5 (resource-specific concurrency).
+**Phase 4 review resolved:**
+
+1. Approved: Extract and Validate stay combined.
+2. Approved: the "who is doing this work" label stays one shared value per run until Phase 7 gives per-worker identity real meaning.
+3. Approved: the new queue-capacity default stands as a placeholder pending Phase 11.
+
+Approved. Proceeded to Phase 5.
+
+---
+
+## Phase 5 — Resource-specific concurrency
+
+### Implemented
+
+Before this phase, there was exactly one concurrency limit anywhere in the pipeline: how many versions could be active at once (the worker-pool size from Phases 3–4). A version occupying one of those slots could be doing anything — downloading, extracting, or converting — and nothing distinguished those from each other. That's a real gap: downloading is mostly waiting on the network, while extracting and converting are mostly waiting on the CPU and disk. A host with plenty of bandwidth but few CPU cores (or the reverse) had no way to express that difference; the only lever was the one overall "how many versions at once" number.
+
+This phase adds two more limits, each independent of the worker-pool size and of each other:
+
+```text
+Version worker (still bounded by the existing "how many versions at once" limit)
+    |
+    +-- network limit        -> Download
+    +-- CPU/disk limit       -> Extract
+    +-- CPU/disk limit       -> Convert
+```
+
+Download draws from one limit. Extract and Convert draw from a *second*, shared limit — not two separate ones — since both put the same kind of load (CPU and disk, not network) on the host; the plan's own diagram draws two arrows into one CPU/disk pool. There is still exactly one queue and one worker pool, as there was after Phase 3/4 — this phase only adds finer-grained limits *inside* what a worker does while it holds its slot, not new queues or new worker pools.
+
+**How the limit is implemented (in plain terms, before naming the Rust mechanism):** think of each limit as a small stack of tokens — network tokens and processing tokens, sized independently. Before a version starts downloading, it takes one network token and holds it only for the duration of the download; before it starts extracting, it takes one processing token, holds it only for the duration of the extraction, then gives it back and takes another one for converting. If no token is available, the version simply waits its turn — it does not get skipped, retried elsewhere, or given its own separate line to wait in. (The Rust mechanism behind this "token stack" is a semaphore — a counter that blocks whoever's waiting for a token once it hits zero, and wakes someone up when a token is returned.) Handing a token back happens automatically the instant the piece of work that borrowed it stops running, for any reason — whether it finished normally, finished with an error, or was cancelled outright. That's not a manual "remember to return it" step; it's built into how the token is represented (an object whose sole job is to return the token when it stops being used, at whatever point that happens).
+
+**Two new settings, each defaulting to no observable change.** `GTFS_S_MAX_CONCURRENT_DOWNLOADS` and `GTFS_S_MAX_CONCURRENT_PROCESSING` are new, both defaulting to whatever the existing "how many versions at once" setting already is. An operator who never touches either new variable sees the exact same concurrency behavior as before this phase — the two new limits exist, but at their default size they're never tighter than the worker-pool size already was, so they never bind in practice unless someone deliberately sets them lower. This follows the plan's own caution against inventing precise tuning numbers before Phase 11 actually measures anything.
+
+### Files Changed
+
+- `domains/ingestion/extract/ckan/src/concurrency.rs` (new) — the two independent token pools and the "hold a token for exactly this operation" helper, with 6 focused tests proving the mechanism in isolation (no real downloads or archives involved).
+- `domains/ingestion/extract/ckan/src/snapshot.rs` — Download, Extract, and Convert each now acquire the relevant token before running and release it immediately after; nothing about their actual logic changed.
+- `domains/ingestion/extract/ckan/src/pipeline.rs` — creates the two token pools once per run and hands them to every worker; also introduces a small bundle for the run function's growing list of concurrency-related settings (see Architectural Notes — this was a direct response to a linter warning, not a planned change).
+- `domains/ingestion/extract/ckan/src/config.rs` — the two new settings and their defaulting logic, plus tests.
+- `domains/ingestion/extract/ckan/src/main.rs` — passes the new settings through.
+- `domains/ingestion/extract/ckan/tests/snapshot.rs` — the four existing pipeline tests updated for the new parameter, plus one new test proving the wiring doesn't leak a token across two real, sequential pipeline runs.
+- `domains/ingestion/extract/ckan/src/lib.rs` — registered the new module.
+
+### Tests Added / Updated
+
+9 new tests; nothing existing was modified (only extended with the new parameter). Every test from Phases 0–4 still passes unchanged.
+
+| Test | Proves |
+|---|---|
+| `download_permits_cap_concurrency_independently` | the network limit is respected — never exceeded, but also actually reached (not artificially under-used) |
+| `processing_permits_cap_concurrency_independently` | same proof, for the CPU/disk limit, at its own independent size |
+| `a_saturated_processing_pool_does_not_block_a_concurrent_download` | a version doing CPU-heavy work never makes a *different* version's download wait — the core reason this phase exists |
+| `permit_is_released_after_a_successful_call` | a token comes back after ordinary success |
+| `permit_is_released_after_a_failing_call` | a token comes back after an error, identically — no special-case cleanup needed |
+| `permit_is_released_if_the_holding_task_is_cancelled` | a token comes back even if the work holding it is cancelled outright, not just when it finishes on its own |
+| `permits_are_not_leaked_across_real_pipeline_runs` (integration) | running two complete, real download-through-publish pipelines back to back, sharing token pools sized at exactly one each, never stalls — proving the wiring into the real pipeline doesn't leak a token, not just the mechanism in isolation |
+| `resource_permit_count_sentinel_zero_defaults_to_max_concurrent` (config) | the new settings' default-to-existing-behavior rule |
+| `resource_permit_count_explicit_value_passes_through` (config) | an operator-supplied value is honored as-is |
+
+### Validation
+
+- Formatting check: clean.
+- Compiler check (whole workspace, including test code): clean, no warnings.
+- Linter (whole workspace, including test code): the same 2 pre-existing style suggestions from Phases 0–4, nothing new — see Architectural Notes for one warning this phase introduced and then resolved.
+- Full test run: **87 passed, 0 failed, 3 skipped** (the pre-existing wall-clock benchmarks, unaffected). Up from 78 in Phase 4 — 9 new tests, zero regressions. The timing-sensitive concurrency tests were also run several times back to back to check for flakiness; all passed consistently.
+
+### Architectural Notes
+
+- **The run function's growing settings list triggered a linter warning, resolved by bundling, not by suppressing it.** Adding the two new settings pushed the main run function's parameter count to 8, past the linter's default threshold for "this function is taking too many separate inputs, consider a structure instead." Rather than silence the warning, the four concurrency-related settings (worker-pool size, queue capacity, download limit, processing limit) were grouped into one small named bundle, cutting the function back down to a normal-sized argument list and giving future phases (Phase 8's observability, Phase 11's tuning) one coherent group of "concurrency settings" to log or adjust together rather than four scattered values.
+- **A token being returned automatically, even on cancellation, is a property of how it's represented, not of any explicit cleanup code written for this feature.** This is worth calling out because it's easy to assume "returned on cancellation" needed its own special-case handling; it didn't — it falls out of the same "the token's sole purpose is to hand itself back when it stops being used" design that already handles the success and failure cases identically. The cancellation test exists to confirm this empirically rather than just take it on faith.
+- **Extract and Convert intentionally share one CPU/disk limit rather than getting one each**, matching the plan's own diagram. A version's Extract and Convert never overlap in time for that same version (Convert only starts after Extract finishes), so this doesn't cost anything in terms of how much overlap is possible across *different* versions — it just avoids inventing a third independent setting for something that's really one resource concern (CPU and disk contention) wearing two different hats.
+
+### Deviations / Risks
+
+- None from the plan's Phase 5 scope. The parameter-bundling change was a direct, minimal response to a linter warning this phase's own changes introduced, not a separate design decision — flagged here for transparency since it touches the `run` function's public signature, even though it doesn't change behavior.
+- Both new settings' defaults (matching the existing worker-pool-size setting) are, like Phase 4's queue-capacity default, placeholders pending Phase 11's actual measurement — noted again here since Phase 5 is precisely the phase those measurements will eventually tune.
+
+### Review Questions
+
+1. The decision to bundle the four concurrency-related settings into one structure (in response to the linter warning) rather than, say, accepting the longer parameter list — any preference either way?
+2. Confirm the two new settings' "default to no observable change" behavior is what you want for this initial rollout, versus, say, defaulting the processing limit to something below the worker-pool size out of the gate (e.g. to leave headroom for other host processes) even without a measurement backing that choice yet.
+
+---
+
+**WAITING FOR APPROVAL** to begin Phase 6 (stage-aware crash recovery).

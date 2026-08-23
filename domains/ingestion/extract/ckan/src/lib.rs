@@ -6,6 +6,7 @@
 
 pub mod archive;
 pub mod ckan_client;
+pub mod concurrency;
 pub mod config;
 pub mod domain;
 pub mod download;

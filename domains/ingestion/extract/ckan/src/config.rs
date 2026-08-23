@@ -49,6 +49,22 @@ pub struct CkanConfig {
     /// in practice, while still being a genuine fixed ceiling rather than
     /// "however many happen to be eligible this run."
     pub max_queued_versions: usize,
+    /// Maximum number of versions that may be *downloading* at once
+    /// (implementation plan Phase 5: `MAX_CONCURRENT_DOWNLOADS`), independent
+    /// of `max_concurrent_versions` (which still bounds how many versions are
+    /// active overall, in any stage). Overridable via
+    /// `GTFS_S_MAX_CONCURRENT_DOWNLOADS`. Defaults to `max_concurrent_versions`
+    /// — i.e. no additional restriction beyond the pre-Phase-5 behavior,
+    /// since this is a new knob for operators who want it, not a value with
+    /// a measured "correct" default yet (see Phase 11).
+    pub max_concurrent_downloads: usize,
+    /// Maximum number of versions that may be *extracting or converting* at
+    /// once (implementation plan Phase 5: `MAX_CONCURRENT_PROCESSING`) — one
+    /// shared pool for both stages, since both are CPU/disk-heavy rather than
+    /// network-heavy. Overridable via `GTFS_S_MAX_CONCURRENT_PROCESSING`.
+    /// Defaults to `max_concurrent_versions`, for the same reason as
+    /// `max_concurrent_downloads` above.
+    pub max_concurrent_processing: usize,
     pub api_connect_timeout: Duration,
     pub api_request_timeout: Duration,
     pub download_connect_timeout: Duration,
@@ -65,6 +81,14 @@ impl CkanConfig {
         )?)?;
         let max_queued_versions = parse_max_queued(
             env_parsed_or("GTFS_S_MAX_QUEUED_VERSIONS", 0usize)?,
+            max_concurrent_versions,
+        );
+        let max_concurrent_downloads = parse_resource_permit_count(
+            env_parsed_or("GTFS_S_MAX_CONCURRENT_DOWNLOADS", 0usize)?,
+            max_concurrent_versions,
+        );
+        let max_concurrent_processing = parse_resource_permit_count(
+            env_parsed_or("GTFS_S_MAX_CONCURRENT_PROCESSING", 0usize)?,
             max_concurrent_versions,
         );
 
@@ -84,6 +108,8 @@ impl CkanConfig {
             cutoff_version: parse_cutoff_version(&env_or("GTFS_S_CUTOFF_VERSION", "20260101"))?,
             max_concurrent_versions,
             max_queued_versions,
+            max_concurrent_downloads,
+            max_concurrent_processing,
             api_connect_timeout: Duration::from_secs(env_parsed_or(
                 "GTFS_S_CKAN_API_CONNECT_TIMEOUT_SECS",
                 10,
@@ -160,6 +186,16 @@ fn parse_max_queued(raw: usize, max_concurrent: usize) -> usize {
     }
 }
 
+/// Shared by `GTFS_S_MAX_CONCURRENT_DOWNLOADS` and
+/// `GTFS_S_MAX_CONCURRENT_PROCESSING`: when `raw` is 0 (the sentinel),
+/// defaults to `default_to` (in practice, `max_concurrent_versions`) — an
+/// operator who never sets either variable sees no change in observed
+/// concurrency from before Phase 5. An explicit positive value is used
+/// directly.
+fn parse_resource_permit_count(raw: usize, default_to: usize) -> usize {
+    if raw == 0 { default_to } else { raw }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +263,15 @@ mod tests {
     #[test]
     fn max_queued_explicit_value_passes_through() {
         assert_eq!(parse_max_queued(10, 3), 10);
+    }
+
+    #[test]
+    fn resource_permit_count_sentinel_zero_defaults_to_max_concurrent() {
+        assert_eq!(parse_resource_permit_count(0, 4), 4);
+    }
+
+    #[test]
+    fn resource_permit_count_explicit_value_passes_through() {
+        assert_eq!(parse_resource_permit_count(2, 4), 2);
     }
 }

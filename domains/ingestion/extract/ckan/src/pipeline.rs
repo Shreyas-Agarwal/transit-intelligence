@@ -2,7 +2,7 @@
 //! discovery, reconciliation, bounded concurrent processing, and the
 //! post-processing bookkeeping (manifest rebuild, `latest` advancement).
 //!
-//! # Architecture (implementation plan Phases 1-4)
+//! # Architecture (implementation plan Phases 1-5)
 //!
 //! ```text
 //! CKAN discovery
@@ -16,6 +16,11 @@
 //!     v                  eligible work never spawns more workers, it waits
 //! process_snapshot()     crate::snapshot — claim, download, verify, extract,
 //!                        validate, convert, publish, complete, per version
+//!     |
+//!     v
+//! resource permits       crate::concurrency — Download draws from one limit,
+//!                        Extract/Convert draw from a second, independent
+//!                        limit, both independent of the worker-pool size above
 //! ```
 //!
 //! Enqueuing eligible versions and draining their results run concurrently
@@ -57,6 +62,7 @@ use chrono::Utc;
 
 use crate::archive::ArchiveError;
 use crate::ckan_client::{CkanClient, CkanClientError};
+use crate::concurrency::ResourcePermits;
 use crate::domain::{UpstreamResource, VersionId};
 use crate::download::DownloadError;
 use crate::lock::{LockError, UpdaterLock};
@@ -94,6 +100,26 @@ pub enum PipelineError {
     LatestMismatch(String),
     #[error("concurrent task panicked: {0}")]
     Join(#[from] tokio::task::JoinError),
+}
+
+/// Every concurrency knob `run` needs, bundled so the function signature
+/// doesn't grow a new standalone parameter each time a phase adds another
+/// (Phase 3's queue capacity, Phase 5's resource permits, ...). Constructed
+/// directly from the matching `CkanConfig` fields by the caller (`main.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct ConcurrencyConfig {
+    /// How many versions may be active at once, in any stage (Phase 3/4).
+    pub max_concurrent_versions: usize,
+    /// How many eligible versions may sit queued, waiting for a worker,
+    /// before the producer blocks (Phase 3).
+    pub max_queued_versions: usize,
+    /// How many versions may be downloading at once (Phase 5), independent
+    /// of `max_concurrent_versions`.
+    pub max_concurrent_downloads: usize,
+    /// How many versions may be extracting or converting at once (Phase 5;
+    /// one shared limit for both stages), independent of
+    /// `max_concurrent_versions`.
+    pub max_concurrent_processing: usize,
 }
 
 /// Counts and totals from one run, for the end-of-run summary (invaluable in
@@ -195,9 +221,14 @@ pub async fn run(
     ckan_client: &CkanClient,
     download_http: &reqwest::Client,
     cutoff_version: Option<&VersionId>,
-    max_concurrent: usize,
-    max_queued: usize,
+    concurrency: ConcurrencyConfig,
 ) -> Result<RunSummary, PipelineError> {
+    let ConcurrencyConfig {
+        max_concurrent_versions: max_concurrent,
+        max_queued_versions: max_queued,
+        max_concurrent_downloads,
+        max_concurrent_processing,
+    } = concurrency;
     let started_at = Instant::now();
     std::fs::create_dir_all(layout.root())?;
 
@@ -291,12 +322,16 @@ pub async fn run(
     );
     let states_snapshot: Arc<BTreeMap<VersionId, VersionWork>> = Arc::new(states.clone());
     let worker_id = format!("{}:{}", crate::lock::hostname(), std::process::id());
+    // Independent of the worker-pool size above: Download draws from one
+    // limit, Extract/Convert share a second — see crate::concurrency.
+    let permits = ResourcePermits::new(max_concurrent_downloads, max_concurrent_processing);
 
     let (work_queue, mut results_rx, mut workers) = {
         let http = download_http.clone();
         let layout = layout.clone();
         let resources_by_version = Arc::clone(&resources_by_version);
         let states_snapshot = Arc::clone(&states_snapshot);
+        let permits = permits.clone();
         queue::spawn(
             QueueConfig {
                 max_queued: max_queued.max(1),
@@ -305,6 +340,7 @@ pub async fn run(
             move |version: VersionId| {
                 let http = http.clone();
                 let layout = layout.clone();
+                let permits = permits.clone();
                 let resource = resources_by_version
                     .get(&version)
                     .cloned()
@@ -315,7 +351,8 @@ pub async fn run(
                     .expect("a queued version must have a control-plane record from reconcile()");
                 let worker_id = Some(worker_id.clone());
                 async move {
-                    snapshot::process_snapshot(&http, &layout, &resource, work, worker_id).await
+                    snapshot::process_snapshot(&http, &layout, &resource, &permits, work, worker_id)
+                        .await
                 }
             },
         )

@@ -34,10 +34,18 @@
 //! record could be created, transitioned, and persisted in isolation
 //! (Phases 1–2), but nothing in the real pipeline ever called `start()`,
 //! `publish()`, or `fail()` — this module is where that stops being true.
+//!
+//! Phase 5 adds one more thing here: Download (stage 2) and Extract/Convert
+//! (stages 4 and 6) each acquire a resource-specific permit
+//! (`crate::concurrency::ResourcePermits`) before doing their work — a
+//! network-work limit independent from a CPU/disk-work limit, both
+//! independent from how many versions are active overall. See that module
+//! for why they're split and why Extract and Convert share one pool.
 
 use chrono::Utc;
 
 use crate::archive;
+use crate::concurrency::ResourcePermits;
 use crate::domain::UpstreamResource;
 use crate::download;
 use crate::manifest::{self, SidecarStatus, SnapshotMeta};
@@ -71,6 +79,7 @@ pub async fn process_snapshot(
     http: &reqwest::Client,
     layout: &RawLayout,
     resource: &UpstreamResource,
+    permits: &ResourcePermits,
     mut work: VersionWork,
     worker_id: Option<String>,
 ) -> ProcessOutcome {
@@ -89,7 +98,7 @@ pub async fn process_snapshot(
     persist(layout, &work);
 
     // -- Stages 2-7: Download, Verify, Extract+Validate, Convert, Publish ---
-    let result = run_stages(http, layout, resource).await;
+    let result = run_stages(http, layout, resource, permits).await;
 
     // -- Stage 8: Complete ---------------------------------------------------
     let now = Utc::now();
@@ -144,6 +153,7 @@ async fn run_stages(
     http: &reqwest::Client,
     layout: &RawLayout,
     resource: &UpstreamResource,
+    permits: &ResourcePermits,
 ) -> Result<SnapshotMeta, PipelineError> {
     let dir_name = resource.snapshot_dir_name();
     let part_path = layout.staging_part_path(&dir_name);
@@ -158,10 +168,13 @@ async fn run_stages(
         std::fs::remove_dir_all(&parquet_staging)?;
     }
 
-    // -- Stage 2: Download ---------------------------------------------------
+    // -- Stage 2: Download (bounded by the network permit pool) --------------
     let downloaded_at = Utc::now();
-    let outcome =
-        download::download_to_staging(http, &resource.download_url, &part_path, &zip_path).await?;
+    let outcome = permits
+        .with_download_permit(|| {
+            download::download_to_staging(http, &resource.download_url, &part_path, &zip_path)
+        })
+        .await?;
     tracing::info!(
         version = %resource.version,
         bytes = outcome.bytes,
@@ -181,14 +194,16 @@ async fn run_stages(
 
     std::fs::create_dir_all(&extract_staging)?;
 
-    // -- Stages 4-5: Extract + Validate (kept atomic; see module doc comment) --
+    // -- Stages 4-5: Extract + Validate (bounded by the processing permit pool) --
     {
         let zip = zip_path.clone();
         let extract = extract_staging.clone();
-        if let Err(e) =
-            tokio::task::spawn_blocking(move || archive::validate_and_extract(&zip, &extract))
-                .await?
-        {
+        let result = permits
+            .with_processing_permit(move || {
+                tokio::task::spawn_blocking(move || archive::validate_and_extract(&zip, &extract))
+            })
+            .await?;
+        if let Err(e) = result {
             let _ = std::fs::remove_file(&zip_path);
             let _ = std::fs::remove_dir_all(&extract_staging);
             return Err(e.into());
@@ -198,15 +213,18 @@ async fn run_stages(
 
     std::fs::create_dir_all(&parquet_staging)?;
 
-    // -- Stage 6: Convert -----------------------------------------------------
+    // -- Stage 6: Convert (same processing permit pool as Extract) -----------
     {
         let csv_dir = extract_staging.clone();
         let pq_dir = parquet_staging.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            parquet_convert::convert_directory(&csv_dir, &pq_dir)
-        })
-        .await?
-        {
+        let result = permits
+            .with_processing_permit(move || {
+                tokio::task::spawn_blocking(move || {
+                    parquet_convert::convert_directory(&csv_dir, &pq_dir)
+                })
+            })
+            .await?;
+        if let Err(e) = result {
             let _ = std::fs::remove_file(&zip_path);
             let _ = std::fs::remove_dir_all(&extract_staging);
             let _ = std::fs::remove_dir_all(&parquet_staging);

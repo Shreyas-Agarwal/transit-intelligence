@@ -7,6 +7,7 @@ use clap::Parser;
 
 use ckan::config::CkanConfig;
 use ckan::paths::RawLayout;
+use ckan::pipeline::ConcurrencyConfig;
 
 #[derive(Parser)]
 #[command(
@@ -40,8 +41,12 @@ async fn main() -> anyhow::Result<()> {
         &ckan_client,
         &download_http,
         cfg.cutoff_version.as_ref(),
-        cfg.max_concurrent_versions,
-        cfg.max_queued_versions,
+        ConcurrencyConfig {
+            max_concurrent_versions: cfg.max_concurrent_versions,
+            max_queued_versions: cfg.max_queued_versions,
+            max_concurrent_downloads: cfg.max_concurrent_downloads,
+            max_concurrent_processing: cfg.max_concurrent_processing,
+        },
     )
     .await
     .inspect_err(|e| tracing::error!(error = %e, "updater run failed"))?;
