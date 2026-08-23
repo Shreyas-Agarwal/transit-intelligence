@@ -39,6 +39,16 @@ pub struct CkanConfig {
     /// and up to four CPU cores during parallel Parquet conversion. Reduce if
     /// either resource is constrained on the host running this binary.
     pub max_concurrent_versions: usize,
+    /// Maximum number of eligible versions that may sit queued, waiting for
+    /// a worker, before the scheduler blocks rather than accepting more
+    /// (implementation plan Phase 3/4: `MAX_QUEUED_VERSIONS`, a bound
+    /// independent of `max_concurrent_versions`). Overridable via
+    /// `GTFS_S_MAX_QUEUED_VERSIONS`. Defaults to `2 * max_concurrent_versions`
+    /// (floor 4): generous enough that a normal run's eligible set — a
+    /// handful of versions between twice-weekly publications — never blocks
+    /// in practice, while still being a genuine fixed ceiling rather than
+    /// "however many happen to be eligible this run."
+    pub max_queued_versions: usize,
     pub api_connect_timeout: Duration,
     pub api_request_timeout: Duration,
     pub download_connect_timeout: Duration,
@@ -48,6 +58,15 @@ pub struct CkanConfig {
 impl CkanConfig {
     pub fn from_env() -> Result<Self, ti_common::ConfigError> {
         load_dotenv();
+
+        let max_concurrent_versions = parse_max_concurrent(env_parsed_or(
+            "GTFS_S_MAX_CONCURRENT_VERSIONS",
+            0usize, // 0 = sentinel: compute the default
+        )?)?;
+        let max_queued_versions = parse_max_queued(
+            env_parsed_or("GTFS_S_MAX_QUEUED_VERSIONS", 0usize)?,
+            max_concurrent_versions,
+        );
 
         Ok(Self {
             ckan_api_url: env_or(
@@ -63,10 +82,8 @@ impl CkanConfig {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| default_raw_dir()),
             cutoff_version: parse_cutoff_version(&env_or("GTFS_S_CUTOFF_VERSION", "20260101"))?,
-            max_concurrent_versions: parse_max_concurrent(env_parsed_or(
-                "GTFS_S_MAX_CONCURRENT_VERSIONS",
-                0usize, // 0 = sentinel: compute the default
-            )?)?,
+            max_concurrent_versions,
+            max_queued_versions,
             api_connect_timeout: Duration::from_secs(env_parsed_or(
                 "GTFS_S_CKAN_API_CONNECT_TIMEOUT_SECS",
                 10,
@@ -131,6 +148,18 @@ fn parse_max_concurrent(raw: usize) -> Result<usize, ti_common::ConfigError> {
     }
 }
 
+/// When `raw` is 0 (the sentinel for "use the default"), returns
+/// `2 * max_concurrent` with a floor of 4 — generous enough that a normal
+/// run's eligible set never blocks in practice, while still a genuine fixed
+/// ceiling. An explicit positive value is used directly.
+fn parse_max_queued(raw: usize, max_concurrent: usize) -> usize {
+    if raw == 0 {
+        max_concurrent.saturating_mul(2).max(4)
+    } else {
+        raw
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +212,20 @@ mod tests {
     fn max_concurrent_explicit_value_passes_through() {
         assert_eq!(parse_max_concurrent(8).unwrap(), 8);
         assert_eq!(parse_max_concurrent(1).unwrap(), 1);
+    }
+
+    #[test]
+    fn max_queued_sentinel_zero_defaults_to_twice_max_concurrent() {
+        assert_eq!(parse_max_queued(0, 3), 6);
+    }
+
+    #[test]
+    fn max_queued_sentinel_zero_has_a_floor_of_four() {
+        assert_eq!(parse_max_queued(0, 1), 4, "2 * 1 must still floor to 4");
+    }
+
+    #[test]
+    fn max_queued_explicit_value_passes_through() {
+        assert_eq!(parse_max_queued(10, 3), 10);
     }
 }

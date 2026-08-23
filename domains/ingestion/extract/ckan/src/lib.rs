@@ -16,5 +16,6 @@ pub mod paths;
 pub mod pipeline;
 pub mod queue;
 pub mod reconcile;
+pub mod snapshot;
 pub mod symlink;
 pub mod work_state;

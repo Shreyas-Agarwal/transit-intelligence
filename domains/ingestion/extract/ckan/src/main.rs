@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         &download_http,
         cfg.cutoff_version.as_ref(),
         cfg.max_concurrent_versions,
+        cfg.max_queued_versions,
     )
     .await
     .inspect_err(|e| tracing::error!(error = %e, "updater run failed"))?;

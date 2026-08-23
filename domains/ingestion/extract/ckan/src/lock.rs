@@ -114,7 +114,9 @@ fn read_lock_contents(path: &Path) -> Result<LockContents, LockError> {
     serde_json::from_str(&buf).map_err(|e| LockError::Corrupt(e.to_string()))
 }
 
-fn hostname() -> String {
+/// Also used by `crate::pipeline` to build a process-level `worker_id` for
+/// `VersionWork` records — not just the lock's own liveness check.
+pub(crate) fn hostname() -> String {
     // `hostname::get()` would pull in another dependency for one syscall; the
     // env var is set by essentially every POSIX shell and is good enough for a
     // same-host liveness check.

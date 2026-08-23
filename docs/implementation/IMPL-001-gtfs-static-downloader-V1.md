@@ -397,4 +397,97 @@ Following the Phase 2 refinement, the module is generic over the item and result
 
 ---
 
-**WAITING FOR APPROVAL** to begin Phase 4 (explicit snapshot processing pipeline).
+**Phase 3 review resolved:**
+
+1. Approved: keep the bounded output channel; concurrent draining is now a hard integration invariant for every future consumer of the queue, not just a test-writing lesson.
+2. Approved: `max_active` stays enforced by a fixed-size worker pool, not a separate concurrency limiter.
+3. Approved: the queue module stays generic rather than specialized to a GTFS version identifier.
+
+Approved. Proceeded to Phase 4.
+
+---
+
+## Phase 4 — Explicit snapshot processing pipeline
+
+*A note on how this report is written: previous phase reports used Rust-specific terms (a specific standard-library type name, a specific async construct) somewhat freely. Starting with this phase, per your direction, the report leads with what a mechanism does architecturally, and only names the underlying Rust primitive as a brief aside — e.g. "we cap this at N concurrent operations (Rust: a semaphore)" rather than assuming the reader already knows what a semaphore is.*
+
+### Implemented
+
+This phase does two things: it makes the eight processing stages the plan specifies explicit and independently identifiable in the code (rather than one long function), and — for the first time — it actually connects everything built in Phases 1–3 (the durable per-version status record, the reconciliation logic, and the bounded queue) into the real download-and-publish path. Phases 1–3 built and tested each piece in isolation without touching the live pipeline; this phase is where that stops being true.
+
+**The eight stages, and where each one lives:**
+
+| # | Stage | What it does | Status this phase |
+|---|---|---|---|
+| 1 | Claim | Marks a version as "being worked on now" and records who's working on it | **New** — wires the Phase 1 status record into real processing for the first time |
+| 2 | Download | Streams the archive to a temporary location | Unchanged, moved as-is |
+| 3 | Verify | Checks the downloaded byte count and cryptographic checksum | Unchanged, moved as-is |
+| 4 | Extract | Unpacks the archive | Unchanged, moved as-is — see note below on why 4 and 5 stay combined |
+| 5 | Validate | Confirms the required GTFS files are present and intact | Unchanged, moved as-is |
+| 6 | Convert | Turns each extracted text file into a Parquet file | Unchanged, moved as-is |
+| 7 | Publish | Atomically swaps the finished snapshot into its permanent location | Unchanged, moved as-is |
+| 8 | Complete | Writes the permanent record of what was published, then marks the version done (or failed) | **New** — the other half of the Phase 1 wiring |
+
+A new module, `ckan::snapshot`, holds `process_snapshot(version)` — the single function a worker calls, doing all eight stages in order. Stages 2–7 are the exact same logic that already existed and was already tested; they were relocated, not rewritten, specifically so nothing about the already-verified download/extract/convert/publish behavior changes. Stages 1 and 8 are genuinely new: before this phase, the Phase 1 status record (`DISCOVERED → QUEUED → RUNNING → PUBLISHED/FAILED`) could be created and tested on its own, but nothing in the real pipeline ever actually moved a version through it. Now, every real processing attempt does.
+
+**Why stages 4 (Extract) and 5 (Validate) stay combined, not split.** The existing extraction code deliberately checks the archive's integrity *before* unpacking anything (so a corrupt archive is never partially extracted), and checks it *again* immediately after unpacking (to catch damage introduced by the extraction step itself, which the first check can't see). Splitting "extract" and "validate" into two independent functions would mean either losing one of those two checks or duplicating the pre-check logic. Given the instruction to preserve current functional behavior while improving the surrounding architecture, I chose to keep this as one deliberate unit and document why, rather than force a structural split that would change existing, already-relied-upon safety behavior. This was flagged as an open question back in the Phase 0 report and is resolved here — see the review question below if you'd prefer a different call.
+
+**Wiring the pieces together, in `pipeline::run`:** the run function now does discovery, hands the result to the Phase 2 reconciliation logic (which decides what's actually eligible to process this run), persists the reconciliation's decisions immediately, and then feeds the eligible versions into the Phase 3 bounded queue. Each of the fixed pool of workers calls `process_snapshot` for whichever version it's handed. As you directed in the Phase 2 refinement: the queue only ever carries a bare version identifier, never the full resource details (download URL, publisher checksum, etc.) — those are looked up from the discovery result this run already fetched, kept alive for the whole run, and never re-queried from CKAN. A worker also needs the version's current status record; that's looked up the same way, from what reconciliation already decided, rather than re-computed.
+
+Feeding the queue and reading its results back happen at the same time, in parallel — this was the hard integration invariant you approved after the Phase 3 deadlock finding, and it's now load-bearing in the real pipeline, not just in tests.
+
+**A new configuration knob was needed and added:** the plan calls for the queue's waiting-room capacity (how many eligible versions may be queued up, separate from how many are actively being worked on) to be an independently bounded number, not just "as many as happen to be eligible this run." A new environment variable, `GTFS_S_MAX_QUEUED_VERSIONS`, controls this (default: twice the active-worker count, floor of 4) — mirroring exactly how the existing `GTFS_S_MAX_CONCURRENT_VERSIONS` variable already works.
+
+### Files Changed
+
+- `domains/ingestion/extract/ckan/src/snapshot.rs` (new) — `process_snapshot`, the eight-stage worker function.
+- `domains/ingestion/extract/ckan/tests/snapshot.rs` (new) — 4 integration tests, including one that runs a real download against a small local test server.
+- `domains/ingestion/extract/ckan/src/pipeline.rs` — the old direct-spawn loop is replaced by discovery → reconciliation → queue wiring; the moved-out download/extract/convert/publish logic is gone from this file (it now lives in `snapshot.rs`); everything else (locking, manifest rebuilding, advancing the "latest" pointer) is untouched.
+- `domains/ingestion/extract/ckan/src/config.rs` — added the new `GTFS_S_MAX_QUEUED_VERSIONS` setting, plus its own default-value tests.
+- `domains/ingestion/extract/ckan/src/main.rs` — passes the new setting through.
+- `domains/ingestion/extract/ckan/src/lock.rs` — the existing "what host and process am I" helper is now also reusable from `pipeline.rs`, instead of duplicating that logic, to build a simple per-run "who did this work" label (see Architectural Notes).
+- `domains/ingestion/extract/ckan/src/lib.rs` — registered the new module.
+
+### Tests Added / Updated
+
+7 new tests; nothing existing was modified, and every one of the 71 tests from Phases 0–3 still passes unchanged — meaningful confirmation that moving the download/extract/convert/publish logic really didn't change its behavior.
+
+| Test | Proves |
+|---|---|
+| `full_pipeline_download_through_publish_succeeds` (integration) | the complete stage 1–8 pipeline, run for real against a small local test server standing in for the publisher — nothing stubbed. This is the plan's required "download through publish, as one pipeline" test. |
+| `a_structurally_invalid_archive_fails_and_records_failure` (integration) | a bad archive is correctly recorded as failed, with no partial snapshot ever created |
+| `a_download_failure_is_recorded_as_failed_not_left_running` (integration) | a connection that never succeeds still ends in a recorded failure, never stuck in an ambiguous "in progress" state |
+| `claiming_a_non_queued_version_is_rejected_without_processing` (integration) | a version that isn't actually ready to be worked on is rejected outright, rather than silently processed |
+| `max_queued_sentinel_zero_defaults_to_twice_max_concurrent` (config) | the new setting's default calculation |
+| `max_queued_sentinel_zero_has_a_floor_of_four` (config) | the default never goes below a sensible minimum |
+| `max_queued_explicit_value_passes_through` (config) | an operator-supplied value is honored as-is |
+
+### Validation
+
+- Formatting check: clean.
+- Compiler check (whole workspace, including test code): clean, no warnings.
+- Linter (whole workspace, including test code): the same 2 pre-existing style suggestions from Phases 0–3 (both in an unrelated pre-existing test file), nothing new introduced by this phase's changes.
+- Full test run: **78 passed, 0 failed, 3 skipped** (the pre-existing wall-clock benchmarks, unaffected). Up from 71 in Phase 3 — 7 new tests, zero regressions.
+
+### Architectural Notes
+
+- **"Who is doing this work" is, for now, just "this process."** The status record has a slot for recording which worker claimed a given version. Since everything today still runs as a single process under the existing single-invocation lock, there's no meaningful distinction between workers yet — so this phase fills that slot with one label per run (built from the machine's hostname and this process's ID), shared by every worker task in that run. This is deliberately the simplest thing that's still honest about what's actually running the work; it is not yet the durable "lease" mechanism the plan describes for Phase 7, which is where a real distinction between workers will start to matter (e.g. once there can be more than one process at a time). Your guidance on Phase 1's review — that this identity should eventually be something like a hostname-plus-process-ID or a generated unique ID — is exactly the shape this already takes; Phase 7 is where it becomes load-bearing rather than cosmetic.
+- **Result handling avoids any shared, simultaneously-writable state.** Each worker gets its own private copy of the version's status record, updates that copy as it claims and then completes (or fails) the version, and hands the updated copy back through the result channel. The run function is the only place that ever writes the updated records down — after collecting them, one at a time, never while two workers could be writing at once. This preserves exactly the same "only mutate shared bookkeeping in one place, after work completes" rule the pre-Phase-4 code already followed for the manifest and the "latest" pointer; Phase 4 just extends that same rule to the new status records.
+- **A byte-count/checksum nuance carried forward from Phase 0, now made explicit in the new module's documentation:** the byte-count check (stage 3, "Verify") actually happens as an inherent part of streaming the download itself (stage 2) — it's not a separate pass after the fact — while the cryptographic-checksum check against the publisher's own hash is a distinct step. Both existed before this phase; Phase 4 just names them clearly as sub-parts of one "Verify" stage rather than leaving that split implicit.
+- **A pre-existing minor inaccuracy was corrected in passing, not as new behavior.** A comment in the old code claimed a particular data structure "preserves insertion order," which isn't actually a property that structure has — the real reason the surrounding logic is correct is that new snapshot versions always sort after already-installed ones by date, not because of insertion order. Since this whole area of the code was already being rewritten, I corrected the comment's reasoning to match what's actually true; the underlying logic and its behavior are unchanged.
+
+### Deviations / Risks
+
+- None from the plan's Phase 4 scope.
+- The Extract/Validate merge decision (see above) is the one place this phase made a judgment call the plan didn't fully specify. Flagged as a review question below in case a different structure is preferred.
+- The new queue-capacity setting's default (twice the concurrent-worker count, floor of 4) is a reasonable placeholder, not a measured value — consistent with the plan's later caution (Phase 5, but the same spirit applies here) against inventing precise tuning numbers before there's real data to tune against. It's expected to be revisited in Phase 11 (Performance tuning).
+
+### Review Questions
+
+1. The decision to keep Extract and Validate as one combined stage rather than splitting them — does this match your expectation, or would you prefer they be split even at the cost of restructuring the existing integrity-checking logic?
+2. The "who is doing this work" label is currently one shared value per run (host + process ID), not yet distinct per worker within a run. Confirm this is fine to leave as-is until Phase 7 gives it real meaning, rather than inventing a distinct per-worker label now with no consumer for the distinction.
+3. The new queue-capacity setting's default (twice the concurrent-worker count, floor of 4) — acceptable as a placeholder pending Phase 11's measurement-based tuning, or would you like a different default now?
+
+---
+
+**WAITING FOR APPROVAL** to begin Phase 5 (resource-specific concurrency).
