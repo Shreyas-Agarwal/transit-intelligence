@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct RawLayout {
     raw_dir: PathBuf,
 }

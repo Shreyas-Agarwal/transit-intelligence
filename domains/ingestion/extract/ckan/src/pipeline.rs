@@ -1,11 +1,45 @@
 //! Orchestrates the per-version state machine and the recovery/consistency
 //! checks that must run before it (design doc: pipeline overview diagram, §12).
+//!
+//! # Concurrency model
+//!
+//! Each discovered GTFS version is processed as an independent Tokio task.
+//! An `Arc<Semaphore>` bounds the number of versions concurrently in-flight
+//! (configurable via `GTFS_S_MAX_CONCURRENT_VERSIONS`, default `min(4, CPUs)`).
+//!
+//! Within each task:
+//! * Download is fully async (`reqwest` streaming), never blocking the runtime.
+//! * Archive extraction and CSV→Parquet conversion are CPU/disk-heavy
+//!   synchronous work, so each is wrapped in `tokio::task::spawn_blocking` to
+//!   offload them to Tokio's dedicated blocking-thread pool. This frees the
+//!   async executor thread to drive other tasks (e.g. a concurrent download)
+//!   while the blocking work runs.
+//!
+//! State mutation that must remain serialized — manifest, `latest`, the
+//! `installed` map — is handled only after all tasks complete, in the main
+//! task. No shared mutable state is accessed from concurrent workers.
+//!
+//! # Correctness invariants preserved
+//!
+//! * Staging directories are version-isolated; workers never share paths.
+//! * Atomic rename (staging → final) is per-task and targets distinct paths —
+//!   no two workers can rename to the same final dir.
+//! * `latest` is advanced to the newest *version ID*, not the first worker to
+//!   finish — completion order is irrelevant.
+//! * Failed workers clean their own staging artifacts and never create a final
+//!   snapshot directory.
+//! * The updater lock prevents two independent `ckan` *invocations* from
+//!   running concurrently; it does not serialize the independent workers inside
+//!   a single invocation.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::archive::{self, ArchiveError};
 use crate::ckan_client::{CkanClient, CkanClientError};
@@ -40,6 +74,8 @@ pub enum PipelineError {
          this indicates a bug, not a recoverable runtime state — refusing to guess which side is right"
     )]
     LatestMismatch(String),
+    #[error("concurrent task panicked: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }
 
 /// Counts and totals from one run, for the end-of-run summary (invaluable in
@@ -127,6 +163,11 @@ fn format_duration(elapsed: Duration) -> String {
 /// discover → download → verify → extract → validate → publish for every
 /// upstream version not yet installed, then advance `latest`.
 ///
+/// Up to `max_concurrent` versions are processed simultaneously. Each version
+/// is an independent Tokio task; CPU/disk-heavy stages use `spawn_blocking`.
+/// Manifest, `latest`, and the installed-versions map are mutated only after
+/// all tasks complete — never from concurrent workers.
+///
 /// Safe to run repeatedly on a schedule (design doc §10) and safe to have been
 /// killed mid-run last time (§12) — every run starts by re-establishing a
 /// clean, self-consistent state before touching the network.
@@ -135,6 +176,7 @@ pub async fn run(
     ckan_client: &CkanClient,
     download_http: &reqwest::Client,
     cutoff_version: Option<&VersionId>,
+    max_concurrent: usize,
 ) -> Result<RunSummary, PipelineError> {
     let started_at = Instant::now();
     std::fs::create_dir_all(layout.root())?;
@@ -175,6 +217,7 @@ pub async fn run(
     tracing::info!(
         pending = pending.len(),
         already_present,
+        max_concurrent,
         cutoff_version = ?cutoff_version,
         "versions pending download"
     );
@@ -182,24 +225,66 @@ pub async fn run(
     let attempted = pending.len();
     let mut failed_this_run: BTreeMap<VersionId, ()> = BTreeMap::new();
 
-    for resource in &pending {
+    // -- Concurrent processing phase ------------------------------------------
+    //
+    // Each version gets its own Tokio task. The semaphore caps the number of
+    // tasks simultaneously in-flight. A task acquires the permit before spawning
+    // and holds it for the full version pipeline (download + extract + convert),
+    // so the cap applies to total resource consumption at once.
+    //
+    // JoinSet::join_next processes results as they arrive (real-time per-version
+    // log output, lower peak memory than join_all).
+    let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
+    let mut set: JoinSet<(VersionId, Result<SnapshotMeta, PipelineError>)> = JoinSet::new();
+
+    // Snapshot the installed set size before the concurrent phase so we can
+    // compute which versions were newly downloaded this run.
+    let pre_run_installed_count = installed.len();
+
+    for resource in pending {
+        // acquire_owned gives an OwnedSemaphorePermit that can be moved into
+        // the spawned task. Dropping it releases the slot for the next version.
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            // Semaphore::acquire_owned only errors if closed; we never close it.
+            .expect("semaphore is never closed");
+
+        let http = download_http.clone();
+        let layout = layout.clone();
+        let version = resource.version.clone();
+
         tracing::info!(
             version = %resource.version,
             filename = %resource.original_filename,
             url = %resource.download_url,
-            "processing version"
+            "queuing version for processing"
         );
-        match process_version(download_http, layout, resource).await {
+
+        set.spawn(async move {
+            let result = process_version(&http, &layout, &resource).await;
+            // Drop permit after the full pipeline so the slot reflects actual
+            // resource consumption (staging on disk, network, CPU).
+            drop(permit);
+            (version, result)
+        });
+    }
+
+    // Collect results as tasks complete.
+    while let Some(task_result) = set.join_next().await {
+        let (version, outcome) = task_result?; // propagates task panics
+        match outcome {
             Ok(meta) => {
-                tracing::info!(version = %resource.version, "version verified and published");
-                installed.insert(resource.version.clone(), meta);
+                tracing::info!(%version, "version verified and published");
+                installed.insert(version, meta);
             }
             Err(e) => {
-                tracing::error!(version = %resource.version, error = %e, "version failed; will retry next run");
-                failed_this_run.insert(resource.version.clone(), ());
+                tracing::error!(%version, error = %e, "version failed; will retry next run");
+                failed_this_run.insert(version, ());
             }
         }
     }
+    // -------------------------------------------------------------------------
 
     advance_latest_if_needed(layout, &installed)?;
 
@@ -207,11 +292,14 @@ pub async fn run(
     manifest::write_manifest(layout, &final_manifest)?;
 
     let succeeded = attempted - failed_this_run.len();
-    let bytes_downloaded = pending
-        .iter()
-        .filter(|r| !failed_this_run.contains_key(&r.version))
-        .filter_map(|r| installed.get(&r.version))
-        .map(|meta| meta.archive_size_bytes)
+    // Sum archive_size_bytes over versions that were newly installed this run:
+    // everything in `installed` beyond what was already there before the
+    // concurrent phase. BTreeMap preserves insertion-order within a run when
+    // combined with the skip offset.
+    let bytes_downloaded: u64 = installed
+        .values()
+        .skip(pre_run_installed_count)
+        .map(|m| m.archive_size_bytes)
         .sum();
 
     let summary = RunSummary {
@@ -244,6 +332,12 @@ fn clean_staging(layout: &RawLayout) -> Result<(), PipelineError> {
 /// convert to Parquet → atomic rename → sidecar. Any failure here is reported
 /// to the caller, which records it as `failed` for this run and moves on — it
 /// never becomes `raw/<version>/` and never risks becoming `latest`.
+///
+/// CPU/disk-heavy stages (archive extraction, Parquet conversion) are wrapped
+/// in [`tokio::task::spawn_blocking`] so they execute on Tokio's blocking
+/// thread pool rather than occupying an async executor thread. This keeps the
+/// runtime responsive to concurrent tasks (e.g. another version's download)
+/// while a CPU-heavy conversion is running.
 async fn process_version(
     http: &reqwest::Client,
     layout: &RawLayout,
@@ -281,10 +375,20 @@ async fn process_version(
     }
 
     std::fs::create_dir_all(&extract_staging)?;
-    if let Err(e) = archive::validate_and_extract(&zip_path, &extract_staging) {
-        let _ = std::fs::remove_file(&zip_path);
-        let _ = std::fs::remove_dir_all(&extract_staging);
-        return Err(e.into());
+
+    // Archive extraction: synchronous, CPU/disk-heavy — offload to the blocking
+    // thread pool so the async executor remains free for concurrent downloads.
+    {
+        let zip = zip_path.clone();
+        let extract = extract_staging.clone();
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || archive::validate_and_extract(&zip, &extract))
+                .await?
+        {
+            let _ = std::fs::remove_file(&zip_path);
+            let _ = std::fs::remove_dir_all(&extract_staging);
+            return Err(e.into());
+        }
     }
     tracing::info!(version = %resource.version, "archive-level validation passed (Tier 1)");
 
@@ -293,11 +397,22 @@ async fn process_version(
     // once conversion succeeds. Highly compressible GTFS tables (stop_times,
     // calendar_dates) shrink dramatically vs. raw CSV, which is the point.
     std::fs::create_dir_all(&parquet_staging)?;
-    if let Err(e) = parquet_convert::convert_directory(&extract_staging, &parquet_staging) {
-        let _ = std::fs::remove_file(&zip_path);
-        let _ = std::fs::remove_dir_all(&extract_staging);
-        let _ = std::fs::remove_dir_all(&parquet_staging);
-        return Err(e.into());
+
+    // Parquet conversion: synchronous, CPU-heavy — same spawn_blocking
+    // treatment as archive extraction above.
+    {
+        let csv_dir = extract_staging.clone();
+        let pq_dir = parquet_staging.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            parquet_convert::convert_directory(&csv_dir, &pq_dir)
+        })
+        .await?
+        {
+            let _ = std::fs::remove_file(&zip_path);
+            let _ = std::fs::remove_dir_all(&extract_staging);
+            let _ = std::fs::remove_dir_all(&parquet_staging);
+            return Err(e.into());
+        }
     }
     std::fs::remove_dir_all(&extract_staging)?;
     tracing::info!(version = %resource.version, "converted to parquet");

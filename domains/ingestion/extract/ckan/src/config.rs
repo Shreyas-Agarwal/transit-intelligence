@@ -30,6 +30,15 @@ pub struct CkanConfig {
     /// Overridable via `GTFS_S_CUTOFF_VERSION` (`YYYYMMDD`); set it to an empty
     /// string to disable the cutoff and consider every version upstream lists.
     pub cutoff_version: Option<VersionId>,
+    /// Maximum number of GTFS versions that may be concurrently in-flight
+    /// (download → extract → Parquet). Defaults to `min(4, available_parallelism)`.
+    /// Overridable via `GTFS_S_MAX_CONCURRENT_VERSIONS`.
+    ///
+    /// Caps both network connections and simultaneous staging directories.
+    /// Four concurrent versions consume roughly 1–1.5 GB of staging disk space
+    /// and up to four CPU cores during parallel Parquet conversion. Reduce if
+    /// either resource is constrained on the host running this binary.
+    pub max_concurrent_versions: usize,
     pub api_connect_timeout: Duration,
     pub api_request_timeout: Duration,
     pub download_connect_timeout: Duration,
@@ -54,6 +63,10 @@ impl CkanConfig {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| default_raw_dir()),
             cutoff_version: parse_cutoff_version(&env_or("GTFS_S_CUTOFF_VERSION", "20260101"))?,
+            max_concurrent_versions: parse_max_concurrent(env_parsed_or(
+                "GTFS_S_MAX_CONCURRENT_VERSIONS",
+                0usize, // 0 = sentinel: compute the default
+            )?)?,
             api_connect_timeout: Duration::from_secs(env_parsed_or(
                 "GTFS_S_CKAN_API_CONNECT_TIMEOUT_SECS",
                 10,
@@ -101,6 +114,23 @@ fn parse_cutoff_version(raw: &str) -> Result<Option<VersionId>, ti_common::Confi
         })
 }
 
+/// When `raw` is 0 (the sentinel for "use the default"), returns
+/// `min(4, available_parallelism)`. An explicit positive value is used
+/// directly. Zero is rejected if explicitly set via the env var because the
+/// caller passes the already-parsed value; the sentinel is only reachable
+/// through the `env_parsed_or(…, 0usize)` default path.
+fn parse_max_concurrent(raw: usize) -> Result<usize, ti_common::ConfigError> {
+    if raw == 0 {
+        // Default: cap at 4 unless the machine has fewer logical CPUs.
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Ok(4_usize.min(parallelism).max(1))
+    } else {
+        Ok(raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +170,18 @@ mod tests {
     #[test]
     fn cutoff_version_rejects_garbage() {
         assert!(parse_cutoff_version("not-a-date").is_err());
+    }
+
+    #[test]
+    fn max_concurrent_sentinel_zero_gives_positive_default() {
+        let n = parse_max_concurrent(0).unwrap();
+        assert!(n >= 1, "default must be at least 1, got {n}");
+        assert!(n <= 4, "default is capped at 4, got {n}");
+    }
+
+    #[test]
+    fn max_concurrent_explicit_value_passes_through() {
+        assert_eq!(parse_max_concurrent(8).unwrap(), 8);
+        assert_eq!(parse_max_concurrent(1).unwrap(), 1);
     }
 }

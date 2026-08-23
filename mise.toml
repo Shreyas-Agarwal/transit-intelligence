@@ -37,3 +37,19 @@ description = "Run the GTFS-S transform stage: validate a Bronze snapshot and de
 dir = "domains/ingestion/transform"
 usage = "arg \"mode\" default=\"latest\""
 run = "uv run python -m ingestion.transform \"${usage_mode}\""
+
+[tasks."infra:redis"]
+description = "Start the local Redis server"
+run = "sudo systemctl start redis-server"
+
+[tasks."infra:redpanda"]
+description = "Start the local Redpanda broker"
+run = "sudo systemctl start redpanda"
+
+[tasks."infra:redis:stop"]
+description = "Stop the local Redis server"
+run = "sudo systemctl stop redis-server"
+
+[tasks."infra:redpanda:stop"]
+description = "Stop the local Redpanda broker"
+run = "sudo systemctl stop redpanda"

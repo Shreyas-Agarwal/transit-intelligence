@@ -360,6 +360,77 @@ Two overlapping runs racing to write the same staging paths, or one advancing `l
 
 This is maybe 20 lines of implementation. The alternative — two runs racing on the same staging directory, or `latest` flapping between two versions mid-swap — is the kind of bug that's expensive precisely because it's rare and hard to reproduce. Worth the 20 lines.
 
+### 11.5 Concurrent execution model
+
+Each discovered GTFS version is an independent work item. There is no data dependency between version A's pipeline and version B's pipeline — they share no staging paths, no final paths, no sidecar files, and no global state during their per-version work. The original implementation processed them sequentially as a simplification; the current implementation processes them with bounded dataset-level concurrency.
+
+#### Model
+
+```
+ckan invocation (holds updater lock)
+│
+├── discover eligible versions (sorted oldest-first)
+│
+├── [Arc<Semaphore>  capacity = GTFS_S_MAX_CONCURRENT_VERSIONS]
+│
+├── tokio::spawn(process_version(A))  → Download → Extract → Parquet → rename → sidecar
+├── tokio::spawn(process_version(B))  → Download → Extract → Parquet → rename → sidecar
+├── tokio::spawn(process_version(C))  → (waits for semaphore if cap is reached)
+│           …
+│
+├── join all tasks  ←  collect (VersionId, Result<SnapshotMeta>)
+│
+├── (serialized) advance latest symlink
+├── (serialized) rebuild + write manifest
+└── release updater lock
+```
+
+#### Why a single semaphore per version (not three separate pools)
+
+The alternative — a download pool feeding an extraction pool feeding a conversion pool — adds cross-pool channel coordination and partial-stage failure handling with no demonstrated benefit for this workload. The download stage is I/O-bound and the Parquet conversion stage is CPU-bound, so they naturally complement each other: while one version is converting, another downloads. A single semaphore that caps the number of simultaneously in-flight versions achieves this overlap without the complexity.
+
+Three separate pools would be worth revisiting only if profiling demonstrates that one specific stage is the bottleneck to a degree that warrants independent throttling.
+
+#### `spawn_blocking` for CPU/disk-heavy stages
+
+Archive extraction (`archive::validate_and_extract`) and CSV→Parquet conversion (`parquet_convert::convert_directory`) are fully synchronous blocking calls using `std::fs` and `zip`/`arrow-csv`. Calling them directly inside a Tokio task would block the async executor thread, preventing other tasks from making progress.
+
+Both are wrapped in `tokio::task::spawn_blocking`, which offloads them to Tokio's dedicated blocking thread pool (separate from the async executor). The `async` task `await`s the handle and is free to yield while the blocking work runs. This means: while version A is converting CSVs to Parquet, version B's download can run concurrently on the async executor without stalling.
+
+#### Serialized post-join operations
+
+Only the following operations happen after all tasks complete (in the main task — no concurrent access):
+
+- Collect results into the `installed` `BTreeMap`
+- `advance_latest_if_needed` — computes `max()` over verified version IDs, writes the symlink
+- `rebuild_manifest` + `write_manifest` — writes `.manifest.json`
+
+This preserves all correctness invariants from §§4–7 and §11 without needing a lock between workers.
+
+#### `latest` ordering under concurrency
+
+`latest` is determined by `max()` over verified version IDs after all tasks complete — not by which task finished first. Completion order is irrelevant by construction.
+
+Example: if `20260819`, `20260812`, and `20260805` all complete in reverse order, `latest → 20260819`. If `20260819` fails, `latest → 20260812`. This matches the semantics of the sequential implementation exactly.
+
+#### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `GTFS_S_MAX_CONCURRENT_VERSIONS` | `min(4, available_parallelism)` | Maximum number of GTFS versions simultaneously in-flight. Each active version holds one HTTP connection and up to ~150–300 MB of staging disk space. |
+
+Setting it to `1` restores fully sequential behaviour for resource-constrained hosts.
+
+#### Benchmark (debug build, synthetic 50k-row GTFS fixtures, 3 MB/zip)
+
+| Mode | 4 versions total time | Per-version (apparent) | Relative |
+|---|---|---|---|
+| Sequential (`max=1`) | 8.07 s | 2.02 s | 1.0× (baseline) |
+| Concurrent `max=2` | 5.58 s | 1.40 s | ~1.4× speedup |
+| Concurrent `max=4` | 3.99 s | 1.00 s | **~2.0× speedup** |
+
+On a production run with real GTFS-S archives (~150–300 MB each), the download stage dominates and the speedup from concurrent downloads is expected to be significantly larger (close to linear up to the semaphore cap and network saturation).
+
 ### 12. Recovery
 
 The pipeline is designed so that **the only unsafe moment is inside a single stage**, never across stages — every inter-stage boundary is a filesystem state that's either "hasn't happened" or "fully happened." That constrains what a crash can leave behind, which makes recovery mostly mechanical:
@@ -410,6 +481,10 @@ Still open:
 
 ---
 
-## Next step
+## Status
 
-Implement this design in the `ckan` crate under `domains/ingestion/` (§§1–7): CKAN-based version detection, the download → verify → extract → validate(archive) → publish pipeline, the manifest/sidecar scheme, symlink management, locking, and recovery.
+**Implemented.** The `ckan` crate under `domains/ingestion/extract/ckan` fully implements this design:
+
+- §§1–7: CKAN-based version detection, download → verify → extract → validate(archive) → Parquet conversion → atomic publish pipeline, manifest/sidecar scheme, symlink management.
+- §11 (locking) and §12 (recovery).
+- **§11.5 (concurrent execution model):** bounded dataset-level concurrency via `Arc<Semaphore>` + `tokio::task::JoinSet` + `spawn_blocking` for CPU-heavy stages. Configurable via `GTFS_S_MAX_CONCURRENT_VERSIONS` (default `min(4, available_parallelism)`).
