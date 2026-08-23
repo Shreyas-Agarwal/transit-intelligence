@@ -114,6 +114,14 @@ struct Workload {
     /// `None` is a real, acknowledged blind spot for anything involving
     /// `max_concurrent_downloads`, not an oversight.
     bandwidth_bytes_per_second: Option<u64>,
+    /// Which row-content generator builds this workload's archive — a
+    /// function pointer, not a closure, so `Workload` stays a plain
+    /// `const`-constructible value. Almost every workload uses
+    /// `build_synthetic_zip_bytes`; only the CPU-heavier validation
+    /// workloads below use `build_cpu_heavy_zip_bytes`, deliberately kept
+    /// separate so those don't change what any frozen workload's archive
+    /// actually contains.
+    build_zip: fn(usize) -> Vec<u8>,
 }
 
 /// A normal catch-up run: a handful of real-sized archives, at the default
@@ -126,6 +134,7 @@ const REPRESENTATIVE: Workload = Workload {
     repetitions: 3,
     concurrency: DEFAULT_CONCURRENCY,
     bandwidth_bytes_per_second: None,
+    build_zip: build_synthetic_zip_bytes,
 };
 
 /// A backlog large enough to fill the bounded queue to capacity while every
@@ -144,6 +153,7 @@ const SATURATION: Workload = Workload {
     repetitions: 1,
     concurrency: DEFAULT_CONCURRENCY,
     bandwidth_bytes_per_second: None,
+    build_zip: build_synthetic_zip_bytes,
 };
 
 // -- Download-concurrency experiment (implementation plan Phase 11) --------
@@ -180,6 +190,7 @@ const DOWNLOAD_CONTENTION_BASELINE: Workload = Workload {
     repetitions: 1,
     concurrency: DEFAULT_CONCURRENCY,
     bandwidth_bytes_per_second: Some(DOWNLOAD_CONTENTION_BYTES_PER_SECOND),
+    build_zip: build_synthetic_zip_bytes,
 };
 
 /// The one change: `max_concurrent_downloads` lowered to half the worker
@@ -197,6 +208,50 @@ const DOWNLOAD_CONTENTION_REDUCED: Workload = Workload {
         ..DEFAULT_CONCURRENCY
     },
     bandwidth_bytes_per_second: Some(DOWNLOAD_CONTENTION_BYTES_PER_SECOND),
+    build_zip: build_synthetic_zip_bytes,
+};
+
+// -- CPU-heavier validation (implementation plan Phase 11, review round 2) -
+//
+// Phase 11's download-concurrency experiment found no measurable difference
+// between `max_concurrent_downloads=4` and `=2` — but its synthetic content
+// was far cheaper to process per byte (~2.6% of version time in
+// Extract+Convert) than the real trace that motivated the experiment
+// (17-41% across four versions). This pair exists to check the same
+// hypothesis once more, at a CPU cost ratio actually calibrated toward that
+// real range, and then close the question regardless of the outcome — not
+// to become a third permanent tuning workload alongside the ones above.
+//
+// Same six versions, same 2 MB/s bandwidth cap, same two
+// `max_concurrent_downloads` values as the first experiment — the only
+// change is richer row content (`build_cpu_heavy_zip_bytes`): 25 columns
+// instead of 6, each still a simple, highly compressible arithmetic
+// function of the row index, so compressed archive size — and therefore
+// download time under the same cap — stays comparable while Extract/Convert
+// has meaningfully more real parsing and encoding work to do per row.
+const CPU_HEAVY_ROWS_PER_FILE: usize = 90_000;
+
+const DOWNLOAD_CONTENTION_CPU_HEAVY_BASELINE: Workload = Workload {
+    name: "download-contention-cpu-heavy-baseline (max_concurrent_downloads=4)",
+    versions: 6,
+    rows_per_file: CPU_HEAVY_ROWS_PER_FILE,
+    repetitions: 1,
+    concurrency: DEFAULT_CONCURRENCY,
+    bandwidth_bytes_per_second: Some(DOWNLOAD_CONTENTION_BYTES_PER_SECOND),
+    build_zip: build_cpu_heavy_zip_bytes,
+};
+
+const DOWNLOAD_CONTENTION_CPU_HEAVY_REDUCED: Workload = Workload {
+    name: "download-contention-cpu-heavy-reduced (max_concurrent_downloads=2)",
+    versions: 6,
+    rows_per_file: CPU_HEAVY_ROWS_PER_FILE,
+    repetitions: 1,
+    concurrency: ConcurrencyConfig {
+        max_concurrent_downloads: 2,
+        ..DEFAULT_CONCURRENCY
+    },
+    bandwidth_bytes_per_second: Some(DOWNLOAD_CONTENTION_BYTES_PER_SECOND),
+    build_zip: build_cpu_heavy_zip_bytes,
 };
 
 /// A shared, aggregate bandwidth cap simulating one real, finite network
@@ -259,6 +314,44 @@ fn build_synthetic_zip_bytes(rows_per_file: usize) -> Vec<u8> {
                     format!("{i},val_{i},{},{},{i},{}\n", i * 2, i * 3, i % 100).as_bytes(),
                 )
                 .unwrap();
+            }
+        }
+        w.finish().unwrap();
+    }
+    buf
+}
+
+/// Row content for the CPU-heavier download-concurrency validation only
+/// (see that section's doc comment) — kept entirely separate from
+/// [`build_synthetic_zip_bytes`] so no frozen workload's archive changes.
+/// 25 columns instead of 6; each is still `(i * factor) % 97_919`, a simple
+/// and highly compressible function of the row index, so archive size (and
+/// therefore download time) stays comparable to the original workload while
+/// Extract/Convert has meaningfully more columns to actually parse and
+/// encode per row.
+const CPU_HEAVY_EXTRA_COLUMNS: usize = 80;
+
+fn build_cpu_heavy_zip_bytes(rows_per_file: usize) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for name in REQUIRED_GTFS {
+            w.start_file(*name, opts).unwrap();
+            let mut header = String::from("id,value_a");
+            for c in 0..CPU_HEAVY_EXTRA_COLUMNS {
+                header.push_str(&format!(",value_extra_{c}"));
+            }
+            header.push('\n');
+            w.write_all(header.as_bytes()).unwrap();
+            for i in 0..rows_per_file {
+                let mut row = format!("{i},val_{i}");
+                for c in 0..CPU_HEAVY_EXTRA_COLUMNS {
+                    row.push(',');
+                    row.push_str(&((i * (c + 3)) % 97).to_string());
+                }
+                row.push('\n');
+                w.write_all(row.as_bytes()).unwrap();
             }
         }
         w.finish().unwrap();
@@ -534,7 +627,7 @@ fn describe_environment(workload_root: &Path) -> String {
 }
 
 fn run_workload(workload: &Workload) {
-    let zip_bytes = build_synthetic_zip_bytes(workload.rows_per_file);
+    let zip_bytes = (workload.build_zip)(workload.rows_per_file);
     let zip_kib = zip_bytes.len() / 1024;
 
     println!(
@@ -646,4 +739,16 @@ fn download_concurrency_experiment_baseline() {
 #[ignore = "wall-clock E2E benchmark; run with -- --ignored --nocapture download_concurrency_experiment_reduced"]
 fn download_concurrency_experiment_reduced() {
     run_workload(&DOWNLOAD_CONTENTION_REDUCED);
+}
+
+#[test]
+#[ignore = "wall-clock E2E benchmark; one-time CPU-heavier validation — run with -- --ignored --nocapture download_concurrency_cpu_heavy_baseline"]
+fn download_concurrency_cpu_heavy_baseline() {
+    run_workload(&DOWNLOAD_CONTENTION_CPU_HEAVY_BASELINE);
+}
+
+#[test]
+#[ignore = "wall-clock E2E benchmark; one-time CPU-heavier validation — run with -- --ignored --nocapture download_concurrency_cpu_heavy_reduced"]
+fn download_concurrency_cpu_heavy_reduced() {
+    run_workload(&DOWNLOAD_CONTENTION_CPU_HEAVY_REDUCED);
 }

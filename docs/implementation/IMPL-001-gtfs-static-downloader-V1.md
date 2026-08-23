@@ -1193,6 +1193,104 @@ Two new `#[ignore]`d benchmark tests (`download_concurrency_experiment_baseline`
 1. Worth running a follow-up download-contention experiment with a CPU-heavier synthetic dataset (closer to the real trace's 17-41% Extract+Convert fraction) to check whether the null result holds at a more realistic cost ratio, or is the current evidence sufficient to close this question for now?
 2. Any interest in also capturing a real trace under a *different* `max_concurrent_downloads` value in production (the same way this phase's opening evidence was gathered) as a cheaper alternative to more synthetic-benchmark iteration?
 
+**Phase 11 review resolved:**
+
+1. Approved, once: run one CPU-heavier follow-up at a cost ratio calibrated toward the real trace's 17-41% range, then close the question regardless of outcome — not an invitation to keep expanding the tuning matrix.
+2. No: the real production trace already served its purpose as observational evidence. Production is for validating decisions later, not for running further experiments now; causal tuning decisions go through the controlled benchmark.
+
+### Addendum — CPU-heavier validation (closes the download-concurrency question)
+
+Two more frozen, one-time workloads (`DOWNLOAD_CONTENTION_CPU_HEAVY_BASELINE`/`_REDUCED`), reusing the same six versions and the same 2 MB/s bandwidth cap as the first experiment, differing only in row content: a new generator (`build_cpu_heavy_zip_bytes`, kept entirely separate from the original so no already-frozen workload's archive changed) with 80 extra columns instead of 4, each still a short, simple function of the row index. Row count was reduced (90,000 vs. 340,000) so the archive itself stays small — what mattered for calibration was the ratio, not the absolute size.
+
+Reaching the target cost ratio took genuine calibration, not a single guess — worth recording honestly rather than presenting a clean first attempt that didn't happen:
+
+| Attempt | Columns | Rows/file | Archive size | Extract+Convert fraction |
+|---|---|---|---|---|
+| 1 | 24 (long values) | 130,000 | 43.3 MiB | ~4.1% |
+| 2 | 24 (short values) | 190,000 | 5.8 MiB | ~11.1% |
+| 3 (used) | 80 (short values) | 90,000 | 3.5 MiB | **~25-33%** |
+
+More columns raised parsing/encoding cost per row largely independent of compressed byte count; shorter values kept compressed size (and therefore download time under the same cap) from growing along with it — the two things needed to move the ratio without changing what's actually under test.
+
+**Result, run twice each for stability:**
+
+```
+cpu-heavy baseline (max_concurrent_downloads=4): 11.550s, 12.094s  (Extract+Convert ≈ 25-33% of version time)
+cpu-heavy reduced  (max_concurrent_downloads=2): 11.754s, 11.813s  (Extract+Convert ≈ 25-30% of version time)
+```
+
+**The null result holds at the higher, more realistic cost ratio.** ~0.1-0.3s apart on ~11.5-12s runs — the same order of magnitude as ordinary run-to-run noise seen throughout this whole session's benchmarking, not a directional signal. Lowering `max_concurrent_downloads` produced no measurable wall-clock benefit at ~2.6% CPU fraction (the first experiment) or at ~25-33% (this one).
+
+**The download-concurrency question is closed.** Decision stands: no change to `max_concurrent_downloads`'s relationship to `max_concurrent_versions`. Documented workload conditions for reproducibility: 6 versions, 2 MB/s aggregate bandwidth cap, archives with 80 short-valued extra CSV columns at 90,000 rows/file (~3.5 MiB compressed), `max_concurrent_versions=4` held constant, only `max_concurrent_downloads` (4 vs. 2) varied.
+
+### Updated Validation
+
+Full test run: **118 passed, 0 failed, 6 skipped** (up from 4 — two CPU-heavy validation benchmarks added). Formatting and linting unchanged (clean, zero warnings).
+
+Phase 11 approved.
+
 ---
 
 **WAITING FOR APPROVAL** to begin Phase 12 (V2 Finalization).
+
+**Approved.** Additional scope requested before closing: update the ADRs and the C4 architecture diagrams to reflect the decisions and structure V2 actually arrived at, and — raised mid-review — make the C4 diagrams genuinely readable, not just accurate (the existing component and dynamic diagrams had grown hard to follow).
+
+## Phase 12 — V2 Finalization
+
+**Implemented.** No production code changed this phase — finalization means the documentation record now says what the system actually is, everywhere someone would reasonably look for it.
+
+### DD-001 brought current
+
+`docs/design/DD-001-gtfs-static-downloader.md` still described V1 in several places: a single global semaphore, no durable per-version state, wholesale staging wipe on every restart, a 2.0×-speedup claim from a debug-build synthetic benchmark that Phase 8/11 have since superseded with real evidence. Updated in place (641 → 803 lines) rather than left to drift further from the implementation:
+
+- New **Durable Work State & Reconciliation** section (the FSM, the pure `reconcile()` function, the filesystem-wins rules).
+- **Concurrent Version Processing Workflow** rewritten around the actual bounded-queue/worker-pool/resource-permit architecture and its four independent concurrency knobs.
+- New **Observability Workflow** and **Benchmark Methodology & Results** sections — including the real-trace correction (Download, not Convert, dominates) and the closed download-concurrency question, both fully reasoned in this log.
+- **Recovery Workflow** updated for stage-aware resume in place of wholesale wipe; **Failure Modes** table gained the checksum-mismatch, CRC-corruption, and publish-crash-recovery rows Phase 9 added real tests for.
+- New **Design Evolution**, **Known Limitations**, and **V3 Considerations** sections — the roadmap pivot away from distributed execution stated as settled fact, with IMPL-001 linked for the full reasoning rather than repeated.
+- **Status** section updated to reflect the finalized V2 feature set.
+
+### ADR 0014 — the architecture decision, recorded where architecture decisions live
+
+DD-001 documents *what* V2 is; nothing in the ADR sequence recorded the actual *decision* — reconsidering the original distributed direction (per-version leases, heading toward Redis) mid-plan and staying local-first instead. Added `ADR 0014: Local-First, Durable-State Architecture for the GTFS Static Downloader (V2)`, in the established Status/Context/Decision/Consequences format: what was originally planned, why it was reconsidered before being built, what got built instead, and the reversibility argument (durable state and reconciliation are primitives a future distributed design would still need, not throwaway work).
+
+### C4 diagrams — brought current, then made legible
+
+All four `static-*.md` diagrams under `docs/architecture/c4/ingestion/` still showed the V1 shape (`static-component.md` didn't even have the Phase 3-5 queue or Phase 1 work state; `static-dynamic.md` showed a sequential per-version loop with an unconditional `.staging/` wipe). Updated all three that needed substantive change:
+
+- **static-context.md** — reviewed, left unchanged. The external-system shape (scheduler, two upstream hosts, one downstream reader) hasn't changed; nothing about V2 altered this level.
+- **static-container.md** — minor updates: `ckan_bin`'s description now reflects the queue/permit architecture, `ti-common`'s now includes observability bootstrap, and `raw_store` now lists `.work/`.
+- **static-component.md** — substantially rewritten: 7 new components (`work_state`, `reconcile`, `queue`, `snapshot`, `concurrency`, `telemetry`, plus reflecting `ckan_client` correctly) added alongside the original 8, now organized into **four nested boundaries by call depth** (Entrypoint → Run-Level Orchestration → Per-Version Processing → Durable State/Supporting I/O/Conventions) specifically so arrows only ever point downward, never back up — the thing that was making the un-grouped version hard to follow.
+- **static-dynamic.md** — substantially rewritten and simplified: participants collapsed from 11 to 7 (a representative `Worker` stands in for `snapshot`/`download`/`archive`/`parquet_convert`; `Upstream` collapses the two external hosts), the reconciliation step and stage-aware resume `alt` branches added, and a `par` block makes explicit *why* the producer and result-drain must run concurrently rather than sequentially — a correctness requirement, not a diagramming choice, called out directly in the notes.
+
+**On readability specifically**: the fix wasn't cosmetic rearrangement — it was reducing what each diagram tries to show at once. The component diagram's boundaries enforce a top-to-bottom call-depth reading with zero upward arrows; the dynamic diagram shows one worker's full stage sequence instead of attempting to render N concurrent workers literally. Both are still C4-accurate; neither omits a real relationship to look cleaner.
+
+### Files Changed
+
+- `docs/design/DD-001-gtfs-static-downloader.md` — brought current with V2.
+- `docs/architecture/adr/0014-local-first-durable-state-gtfs-static-downloader.md` (new).
+- `docs/architecture/c4/ingestion/static-container.md`, `static-component.md`, `static-dynamic.md` — updated; `static-context.md` reviewed, unchanged.
+- No source code changes.
+
+### Validation
+
+- Full test suite: **118 passed, 0 failed, 6 skipped** — unchanged from Phase 11's close; this phase touched no code.
+- Mermaid syntax hand-verified (brace/block balance checked) for both rewritten diagrams; not rendered in a live viewer within this session — worth a visual spot-check the first time either renders somewhere real.
+
+### Architectural Notes
+
+- **Documentation drift was real, not hypothetical.** DD-001 and three of four C4 diagrams had fallen behind the implementation by the full distance of Phases 1 through 11 — a concrete illustration of why "finalization" as its own phase, rather than an assumption that docs stay current incidentally, was worth having on the plan.
+- **The C4 component diagram's boundary structure mirrors the ADR's reversibility argument almost exactly**: both say the same thing in different notations — durable state and reconciliation sit underneath, orchestration and per-version processing sit above, and nothing durable is written except through the modules whose whole job is writing it.
+
+### Deviations / Risks
+
+- Mermaid diagrams are correct by hand-verification (structure, balance, cross-references), not by an actual render — if the generic `Boundary()` nesting macro used in `static-component.md` renders differently than expected in whatever viewer is used, it's the one piece of this phase not independently confirmed.
+
+### Review Questions
+
+1. Any interest in a similar C4 pass for `realtime-*`/`service-alerts` diagrams, now that this one exists as a template for "boundary-grouped for call depth, arrows only downward"? Out of scope for this plan, but the pattern is reusable.
+2. Once these diagrams are actually viewed rendered, flag anything that reads worse in practice than intended on the page.
+
+---
+
+**This closes the GTFS Static Downloader V2 implementation plan.** Twelve phases, from a Phase 0 reconnaissance of V1 through this finalization: durable state, reconciliation, a bounded queue, resource-specific concurrency, stage-aware crash recovery, OpenTelemetry observability, a corrected real-world performance baseline, closed reliability gaps, an architecture review, a validated tuning decision, and now a documentation record that matches all of it. No phase was started without the previous one's explicit approval; no phase's report claimed more than its own tests actually proved.

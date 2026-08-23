@@ -4,11 +4,13 @@
 
 The Swiss nationwide GTFS Static (GTFS-S / Fahrplan) feed is published by `opentransportdata.swiss` roughly twice a week. The downloader turns that externally published feed into an inspectable, versioned local snapshot store under `data/bronze/static/`, with a stable `latest` pointer for downstream consumers.
 
-The implemented system lives in `domains/ingestion/extract/ckan/` as the `ckan` crate in the ingestion Cargo workspace. It owns source discovery, downloading, archive verification, extraction, archive-level GTFS structure checks, CSV-to-Parquet conversion, atomic publication, snapshot metadata, concurrency control, and recovery.
+The implemented system lives in `domains/ingestion/extract/ckan/` as the `ckan` crate in the ingestion Cargo workspace. It owns source discovery, reconciliation, downloading, archive verification, extraction, archive-level GTFS structure checks, CSV-to-Parquet conversion, atomic publication, snapshot metadata, durable per-version state, bounded and resource-specific concurrency control, stage-aware crash recovery, and observability.
 
 The downloader deliberately stops at producing a structurally sound, durable Parquet snapshot. Semantic/content-level transformation and downstream operational modelling are separate concerns and are not part of this document.
 
 For the container/component structure of the wider ingestion domain, see the relevant C4 architecture documentation. For the rationale behind individual architectural choices, see the related ADRs listed under [See Also](#see-also).
+
+**This document describes V2** — the architecture as it stands after a 12-phase incremental evolution from a simpler V1 (single semaphore, no durable per-version state, wholesale staging wipe on every restart, no observability). V2 is local-first and single-process by design, not a stepping stone left half-finished toward a distributed system; that direction was deliberately considered and explicitly not taken (see [Design Evolution](#design-evolution)). The full phase-by-phase record — what was tried, what was measured, what was reversed — lives in [IMPL-001](../implementation/IMPL-001-gtfs-static-downloader-V1.md); this document states only the current, settled design.
 
 ---
 
@@ -30,6 +32,12 @@ For the container/component structure of the wider ingestion domain, see the rel
 
 - **Canonical Parquet storage.** CSV files extracted from the upstream ZIP are treated as transient staging data. Persisted snapshots contain Parquet only.
 
+- **Durable, explainable per-version state.** Every discovered version has an explicit, persisted state (`DISCOVERED → QUEUED → RUNNING → PUBLISHED`/`FAILED`) independent of any one process's memory, so "what happened to this version" is always answerable from disk, not inferred from logs or reconstructed from a crash.
+
+- **Resumable, not just recoverable, processing.** An interrupted version resumes from wherever it actually got to — a valid downloaded archive, a valid extraction, a complete conversion — rather than restarting every stage from scratch on every retry.
+
+- **Observable by construction.** A run's own behavior (per-stage timing, queue wait, concurrency achieved, throughput) is answerable from what the process itself recorded, not only inferred after the fact from wall-clock and guesswork.
+
 ---
 
 ## Non-Goals
@@ -47,6 +55,8 @@ For the container/component structure of the wider ingestion domain, see the rel
 - Deleting or pruning retained snapshots. Every successfully published snapshot is retained indefinitely by this component.
 
 - Historical backfill of the entire publisher catalog. Discovery is bounded by `GTFS_S_CUTOFF_VERSION` so the first automated run does not implicitly become an unbounded historical download.
+
+- Distributed execution. Per-version worker ownership, leases, a distributed queue, and multi-process orchestration were explicitly considered and explicitly not built — every reliability, concurrency, and performance question raised while building V2 was answerable inside a single local process. See [V3 Considerations](#v3-considerations) for what would need to be revisited if that changes.
 
 ---
 
@@ -104,28 +114,64 @@ The roll-up manifest can therefore be deleted or regenerated without changing th
 
 ---
 
+## Durable Work State & Reconciliation
+
+Alongside the filesystem's record of what's *installed*, each discovered version has an explicit, persisted control-plane record of what *should happen to it* — a `VersionWork` entry, one JSON file per version under `data/bronze/static/.work/`, independent of any process's in-memory state.
+
+```text
+DISCOVERED
+    ↓
+  QUEUED
+    ↓
+  RUNNING
+   ↙   ↘
+FAILED  PUBLISHED
+```
+
+The transition graph is closed and strictly enforced: every legal move is one specific method (`queue()`, `start()`, `publish()`, `fail()`, `retry()`), and every illegal move is rejected rather than silently coerced. There is exactly one deliberate exception — `reconcile_as_published`, described below.
+
+**Reconciliation is a pure function**, run once at the start of every invocation, before any network call: given the upstream discovery result, the durable work-state records, and the filesystem's own installed-snapshot map, it decides what actually needs to happen this run. No I/O happens inside it; every decision is testable in isolation from the real pipeline.
+
+Reconciliation's rules, filesystem always wins:
+
+- A version the filesystem shows as installed is forced to `PUBLISHED` regardless of what its control-plane record previously said — including bootstrapping a version that has no record at all yet (e.g. a directory installed before this component existed), and **overriding** a record that says something else (a crash between publish and the record being written). This is the one legal way to reach `PUBLISHED` outside the normal `RUNNING → PUBLISHED` transition.
+- A version the control plane shows `RUNNING`, with no filesystem evidence of a live owner, is treated as abandoned by a crashed prior invocation and recovered to `QUEUED`.
+- A version previously `FAILED` and still not installed is retried (`QUEUED` again).
+- A version the control plane claims is `PUBLISHED`, but the filesystem disagrees, is **flagged, not auto-corrected** — surfaced as a loud divergence for investigation, consistent with this design's existing preference for failing loudly over guessing which side of an invariant is right (see `latest` below).
+
+This durable state is what makes crash recovery, idempotent reprocessing, and "at most one worker owns a version at a time" provable rather than assumed, and is what stage-aware resume (below) and observability's per-version spans are both built on.
+
+---
+
 ## Snapshot Processing Workflow
 
 Every eligible version follows the same processing pipeline.
 
 ```mermaid
 flowchart TD
-    A[Discover eligible versions] --> B{Installed?}
-    B -- yes --> Z[Skip]
-    B -- no --> C[Download ZIP to staging]
-    C --> D[Verify size + SHA-256]
-    D --> E[Extract to CSV staging]
-    E --> F[Validate archive structure]
-    F --> G[Convert TXT/CSV → Parquet]
-    G --> H[Delete ZIP + CSV staging]
-    H --> I[Atomic rename Parquet staging → final snapshot]
-    I --> J[Write snapshot metadata sidecar]
-    J --> K[Collect successful version]
-    K --> L[Serialized manifest rebuild]
-    L --> M[Advance latest to newest verified version]
+    A[Reconciled as eligible, QUEUED] --> B[Claim: QUEUED to RUNNING]
+    B --> C{Resumable staging found?}
+    C -- no --> D[Download ZIP to staging]
+    C -- yes, valid --> E
+    D --> E[Verify size + SHA-256]
+    E --> F{Extraction already valid?}
+    F -- no --> G[Extract to CSV staging]
+    F -- yes --> H
+    G --> H{Conversion already complete?}
+    H -- no --> I[Convert TXT/CSV → Parquet]
+    H -- yes --> J
+    I --> J[Delete ZIP + CSV staging]
+    J --> K[Atomic rename Parquet staging → final snapshot]
+    K --> L[Write snapshot metadata sidecar]
+    L --> M[Complete: RUNNING to PUBLISHED]
+    M --> N[Collect successful version]
+    N --> O[Serialized manifest rebuild]
+    O --> P[Advance latest to newest verified version]
 ```
 
 Each version owns its own staging paths. No version shares a staging directory, temporary archive, or sidecar with another version.
+
+The `{...already valid?}`/`{...already complete?}` branches are stage-aware resume (see [Crash During Processing](#crash-during-processing)): a fresh worker inspects the filesystem for durable, trustworthy evidence of prior progress and skips exactly the stages that evidence covers — never more, never based on anything remembered from a previous process.
 
 ### Download
 
@@ -318,56 +364,122 @@ Discovered versions are independent work items. They do not share:
 - sidecar files;
 - per-version state.
 
-The updater therefore processes multiple versions concurrently behind a single semaphore.
+Eligible versions flow through a **bounded local work queue** consumed by a **fixed pool of workers**, with a **second, independent layer of resource-specific limits** inside what each worker does with its slot:
 
 ```text
 ckan invocation
     │
     ├── acquire updater lock
     │
-    ├── discover versions
+    ├── discover + reconcile → eligible versions (QUEUED)
     │
-    ├── bounded semaphore
+    ├── bounded queue (capacity: GTFS_S_MAX_QUEUED_VERSIONS)
+    │        │
+    │        ▼
+    ├── fixed worker pool (size: GTFS_S_MAX_CONCURRENT_VERSIONS)
+    │        │
+    │        ├── worker: Claim → Download → Verify → Extract → Convert → Publish → Complete
+    │        │             │                    │        │
+    │        │             ▼                    ▼        ▼
+    │        │      download permit      processing permit (shared by Extract + Convert)
+    │        │      (GTFS_S_MAX_CONCURRENT_DOWNLOADS)   (GTFS_S_MAX_CONCURRENT_PROCESSING)
+    │        │
+    │        └── (repeats until the queue is drained)
     │
-    ├── process version A ──┐
-    ├── process version B ──┤
-    ├── process version C ──┤
-    │                       │
-    └── join all tasks ─────┘
-            │
-            ├── rebuild manifest
-            ├── advance latest
-            └── release lock
+    ├── producer (enqueuing) and result-draining run concurrently — see note below
+    │
+    ├── rebuild manifest
+    ├── advance latest
+    └── release lock
 ```
+
+Four independent concurrency knobs, all defaulting to `min(4, available_parallelism)` unless configured otherwise:
+
+| Variable | Bounds |
+| --- | --- |
+| `GTFS_S_MAX_CONCURRENT_VERSIONS` | How many versions may be in any stage at once (the worker pool size). |
+| `GTFS_S_MAX_QUEUED_VERSIONS` | How many eligible versions may sit waiting for a worker before the producer blocks. |
+| `GTFS_S_MAX_CONCURRENT_DOWNLOADS` | How many Download stages may run at once, independent of the worker pool size. |
+| `GTFS_S_MAX_CONCURRENT_PROCESSING` | How many Extract-or-Convert stages may run at once (one shared pool for both), independent of the worker pool size. |
 
 The current implementation uses:
 
 ```text
-Arc<Semaphore>
+tokio::sync::mpsc  (the bounded queue itself)
+tokio::sync::Semaphore  (the worker pool's fixed size, and each resource-specific permit pool)
 tokio::task::JoinSet
 tokio::task::spawn_blocking
 ```
 
-`GTFS_S_MAX_CONCURRENT_VERSIONS` controls the maximum number of simultaneously in-flight versions and defaults to:
+**Why resource-specific limits, separate from the worker pool.** A version occupying a worker slot could be doing any of its stages; without a second layer, "4 versions downloading at once" and "4 versions running CPU-heavy Parquet conversion at once" would be indistinguishable, even though those put very different load on the network versus the CPU/disk. Download draws from one pool; Extract and Convert draw from a second, shared pool — both put the same kind of load (CPU + disk, not network) on the host, so splitting them further wasn't worth the added coordination.
 
-```text
-min(4, available_parallelism)
-```
+**Why a bounded queue, not just a semaphore.** Discovery can produce more eligible work than can immediately be processed (e.g. after downtime, or on first run against a bounded historical cutoff). The queue provides backpressure — the producer blocks rather than spawning unbounded tasks — and separates *discovering* eligible work from *executing* it. A fixed worker pool of long-lived tasks reads from it; enqueuing more work never spawns more workers.
 
-The single version-level semaphore is intentional. A separate download pool, extraction pool, and conversion pool would introduce cross-pool coordination and partial-stage failure handling without demonstrated benefit for the current workload.
+**Producer and result-draining must run concurrently, not sequentially** — this is a correctness requirement, not a throughput optimization. With two independently-bounded channels (the work queue and its result channel), draining results only after every item is enqueued can deadlock: workers can get stuck handing back results with nowhere to put them, which stops them from freeing queue capacity, which stops the producer from finishing, which is the only thing that would let result-draining start.
 
-The download stage is I/O-bound while extraction and Parquet conversion are CPU/disk-heavy. `spawn_blocking` keeps those synchronous stages off Tokio's async executor threads so other version downloads can continue.
-
-Only post-join operations are serialized:
+Only post-drain operations are serialized:
 
 - collecting successful results;
 - determining the maximum verified version;
 - advancing `latest`;
 - rebuilding and writing the manifest.
 
-Because `latest` is determined from the maximum verified version, task completion order has no effect on correctness.
+Because `latest` is determined from the maximum verified version, worker completion order has no effect on correctness.
 
-The implementation benchmarked roughly a 2.0× speedup for four synthetic versions with a concurrency cap of four versus fully sequential processing in a debug build. Production archives are substantially larger and download-heavy, so actual gains are expected to depend on network and staging-disk throughput.
+See [Benchmark Methodology & Results](#benchmark-methodology--results) for what these concurrency settings actually measure against — including a corrected finding (Download, not CPU-bound conversion, dominates real per-version time) and a controlled experiment that found no wall-clock benefit from lowering `GTFS_S_MAX_CONCURRENT_DOWNLOADS` below `GTFS_S_MAX_CONCURRENT_VERSIONS`, at either a low or a realistic CPU-to-download cost ratio. Neither default has changed as a result; both are recorded so a future change has a baseline to justify itself against.
+
+---
+
+## Observability Workflow
+
+Every invocation produces one OpenTelemetry-compatible trace, using the standard Rust `tracing` ecosystem — business code creates ordinary `tracing` spans and events; a bridge (`tracing-opentelemetry`) mirrors them into OpenTelemetry automatically, so nothing in the pipeline talks to the OpenTelemetry API directly.
+
+```text
+invocation
+ ├─ discovery
+ ├─ reconciliation
+ └─ processing                (one version at a time, or several in parallel)
+     ├─ version (20260801)
+     │   ├─ download
+     │   ├─ verify
+     │   ├─ extract
+     │   ├─ convert
+     │   └─ publish
+     └─ version (20260802)
+         └─ ...
+```
+
+A version that fails partway shows exactly the stages that ran and no others — a stage that never executes never opens a span. The stage where a failure actually occurred, and the version as a whole, are both marked with OpenTelemetry error status; a stage that completed normally is not.
+
+Alongside the trace, a small set of numbers is tracked in aggregate across the run: counts (discovered/queued/published/failed versions, bytes downloaded, stale-`RUNNING` recoveries), and distributions (queue wait time, per-version total duration, peak concurrency actually reached for the worker pool and each resource-specific permit pool). The distinction from spans is deliberate: a span answers "how long did this take, this run"; a metric answers "how does this number behave in aggregate, across many runs" — the kind of thing a dashboard would alert on. Per-stage timing is recorded as spans only, not duplicated as metrics, to avoid two numbers for the same fact that could quietly disagree.
+
+**Peak concurrency is recorded as a histogram sample per transition, not a live gauge.** This binary runs once per invocation and exits, exporting metrics exactly once, at shutdown — by which point a live "current count" gauge would always read zero, regardless of how much real concurrency happened during the run. Recording every increment/decrement as a histogram sample instead means the exported `max` is the actual peak reached, not a snapshot of the final (always-zero) state.
+
+Today's exporter is stdout, in a structured, human-readable form, printed alongside (not instead of) the existing plain-English run summary — sufficient for local operation and for the benchmark methodology below. Sending telemetry elsewhere (a collector, a hosted backend) is a one-function change in the exporter-selection code; nothing about how spans or metrics are created elsewhere would need to change, because none of that code talks to an exporter directly. Real OTLP export does not exist yet — see [Known Limitations](#known-limitations).
+
+---
+
+## Benchmark Methodology & Results
+
+Two fixed, frozen, reproducible local workloads exist for evaluating this pipeline end to end — driving the real `ckan::pipeline::run` entrypoint against a local fixture CKAN listing and fixture download servers, not the live API:
+
+- **`REPRESENTATIVE`** — a normal catch-up run: 4 versions (matching the default worker-pool size), each archive sized to the low end of this feed's documented real range (~150 MB), at default concurrency.
+- **`SATURATION`** — a large backlog: `max_queued_versions + max_concurrent_versions` = 12 versions, the smallest count that fills the bounded queue to capacity while every worker is simultaneously busy, guaranteeing the producer actually blocks at least once. Same per-archive size as `REPRESENTATIVE` — version *count*, not size, is the only thing that differs, so a future regression can be attributed to one or the other.
+
+**A real production run corrected the benchmark's own headline finding.** The synthetic benchmarks run over loopback with effectively infinite bandwidth; a real trace against the live CKAN API (6 real versions, ~213-235 MB each) showed Download at 59-83% of per-version wall time across every version with full span data, not CPU-bound Parquet conversion. The synthetic benchmark's own measurements weren't wrong for the workload as built — the conclusion drawn from them was wrong for real traffic, because Download was structurally incapable of costing anything on loopback.
+
+The same real trace showed download throughput rising sharply for versions that started downloading later — the signature of several concurrent downloads sharing one finite real connection rather than each having an independent pipe — raising a testable hypothesis: does lowering `GTFS_S_MAX_CONCURRENT_DOWNLOADS` below `GTFS_S_MAX_CONCURRENT_VERSIONS` help, by letting early-finishing archives start Extract/Convert sooner instead of every active worker's download finishing in one bunched batch?
+
+That hypothesis was tested with a purpose-built local experiment — a shared token-bucket bandwidth cap added to the benchmark's fixture download servers, so `GTFS_S_MAX_CONCURRENT_DOWNLOADS` has something real to contend over — comparing `max_concurrent_downloads=4` against `=2`, everything else held fixed, at two different CPU-to-download cost ratios:
+
+| Cost ratio (Extract+Convert share of version time) | `=4` | `=2` | Difference |
+| --- | --- | --- | --- |
+| ~2.6% (first pass) | 62.802s | 62.786s | 16ms |
+| ~25-33% (calibrated toward the real trace's observed 17-41%) | ~11.82s avg | ~11.78s avg | ~0.04s avg |
+
+**No measurable difference at either ratio.** With CPU work this cheap relative to download time, there's nothing meaningful to overlap by finishing individual downloads sooner — total wall-clock is set by total bytes ÷ aggregate bandwidth, essentially independent of how the downloads are scheduled amongst themselves. **Decision: `GTFS_S_MAX_CONCURRENT_DOWNLOADS`'s default relationship to `GTFS_S_MAX_CONCURRENT_VERSIONS` is unchanged.** This is a closed question, backed by a real negative result at a realistic cost ratio — not an unexamined default.
+
+Both workloads and the download-concurrency experiment live in `ckan/tests/benchmark_e2e.rs`, `#[ignore]`d (real wall-clock measurement doesn't belong in a pass/fail CI gate) and runnable directly: `cargo test -p ckan --test benchmark_e2e --release -- --ignored --nocapture <test name>`.
 
 ---
 
@@ -416,23 +528,30 @@ On startup, the updater reconciles state before contacting the upstream API.
 
 ### Staging Artifacts
 
-Anything under:
+Everything under:
 
 ```text
 data/bronze/static/.staging/
 ```
 
-is disposable.
-
-If a previous process left behind:
+is disposable, but — unlike V1 — is no longer wiped wholesale on every startup. Only one thing is unconditionally unresumable and always swept:
 
 ```text
 *.zip.part
-<version>/
-<version>.parquet/
 ```
 
-the next run removes the incomplete staging artifacts before continuing.
+a partial download, never resumable (no HTTP range support in this design). Everything else found under `.staging/` — a complete `.zip`, a validated extraction, a completed conversion — is left in place for that specific version's own worker to inspect and decide about later, using **stage-aware resume**:
+
+| What's found on disk | Recovery |
+| --- | --- |
+| Only `<name>.zip.part` | Discarded; Download restarts. |
+| A complete `<name>.zip` | Re-verified by rehashing the file (no re-download); Verify re-runs from the file already on disk. |
+| `extract_staging/` present but fails the required-member check | Discarded; Extract restarts from the already-verified `.zip`. |
+| `extract_staging/` present and passes the required-member check | Trusted as-is; Download, Extract, and Verify are all skipped — resume straight at Convert. |
+| `parquet_staging/` present but missing a `.parquet` file for some extracted member | Discarded; Convert restarts from the already-valid `extract_staging/`. |
+| `parquet_staging/` fully matches what `extract_staging/` should have produced (including when `extract_staging/` was already cleaned up by a crashed run's own successful conversion) | Trusted as-is; everything through Convert is skipped — resume straight at Publish. |
+
+Every "is this trustworthy" check inspects actual file contents (required members present and non-empty; every extracted `.txt` has a matching non-empty `.parquet`) — a leftover file's mere presence never counts as evidence on its own. A fresh worker with no memory of a previous process's execution reaches exactly the same conclusion that previous process's own replacement would.
 
 ### Stale Lock
 
@@ -440,9 +559,9 @@ If `.updater.lock` refers to a dead local process, it is removed and acquisition
 
 ### Snapshot Without Sidecar
 
-A final-version directory without `.snapshot-meta.json` is not treated as installed.
+A final-version directory without `.snapshot-meta.json` is not treated as installed — reconciliation (above) never counts it, so it's never skipped as already-done.
 
-This state should never be produced by the normal pipeline, so it is also evidence that the filesystem was modified outside the downloader. The updater may safely reprocess the version rather than trusting the incomplete directory.
+This state is a real, expected crash point (a process killed between the atomic rename and the sidecar write), not evidence of external tampering, and reprocessing it is safe and tested end to end: Publish's existing "no sidecar means not really installed" rule means a fresh run overwrites the orphaned directory cleanly, replacing any stale content rather than merging with or trusting it.
 
 ### Missing or Corrupt Manifest
 
@@ -456,7 +575,7 @@ If `latest` points at a snapshot whose sidecar is not `verified`, the updater tr
 
 ### Crash During Processing
 
-A process killed during download, extraction, or conversion leaves only disposable staging state. Previously published snapshots are not modified.
+A process killed during Download, Verify, Extract, or Convert leaves only disposable staging state, inspected and resumed from per the stage-aware table above; a process killed between Publish's atomic rename and its sidecar write leaves a recoverable orphaned directory (above). Previously published snapshots are never modified by any of this.
 
 This gives the system a clean recovery boundary:
 
@@ -465,7 +584,7 @@ published snapshot
         ↑
    atomic boundary
         ↑
- disposable staging
+ disposable-but-resumable staging
 ```
 
 ---
@@ -476,13 +595,17 @@ published snapshot
 | --- | --- |
 | CKAN API unavailable | Run fails without changing existing snapshots, manifest, or `latest`. |
 | Download truncated or corrupt | Discard staging; mark processing as failed; `latest` does not move. |
-| Archive fails integrity checks | Discard staging; version is not published. |
+| Downloaded archive's checksum doesn't match the publisher's | Rejected at Verify, before Extract ever runs; the now-untrusted archive is deleted, not left on disk. |
+| Archive fails integrity checks (missing zip, missing/empty required member) | Discard staging; version is not published. |
+| Archive member's bytes are corrupted after being written (CRC32 mismatch) | Rejected before any file from it is trusted; not partially extracted. |
 | Required GTFS member missing/empty | Reject snapshot before publication. |
 | CSV-to-Parquet conversion fails | Discard both CSV and Parquet staging; do not create final snapshot. |
 | Concurrent updater invocation | Existing run owns `.updater.lock`; second run exits cleanly. |
-| Process killed mid-run | Staging is disposable; stale lock and manifest are recoverable. |
+| Process killed mid-run | Staging is disposable-but-resumable (see [Crash During Processing](#crash-during-processing)); stale lock and manifest are recoverable. |
+| Process killed between atomic rename and sidecar write | Orphaned directory is not counted as installed; safely and cleanly overwritten by reprocessing. |
 | Manifest missing/corrupt | Rebuild from snapshot sidecars. |
 | `latest` invariant violated | Fail loudly rather than silently repairing state. |
+| Eligible work exceeds the bounded queue's capacity | Producer blocks (backpressure) rather than spawning unbounded tasks; no work is dropped. |
 | Disk pressure from retained snapshots | Retention remains intentional; physical storage lifecycle is handled outside the downloader. |
 
 ---
@@ -559,6 +682,7 @@ The `ckan` crate under `domains/ingestion/extract/ckan/` is responsible for:
 
 - discovering upstream GTFS-S versions;
 - authenticating to the CKAN API;
+- reconciling upstream discovery, durable per-version state, and filesystem-installed state into what actually needs to happen this run;
 - streaming and checksumming archives;
 - validating archive integrity;
 - extracting GTFS members into staging;
@@ -569,9 +693,10 @@ The `ckan` crate under `domains/ingestion/extract/ckan/` is responsible for:
 - maintaining the rebuildable manifest;
 - advancing `latest` monotonically;
 - enforcing the updater lock;
-- cleaning stale staging state;
+- cleaning unconditionally-unresumable staging state, and resuming the rest from wherever it actually got to;
 - recovering from interrupted execution;
-- processing independent versions with bounded concurrency.
+- processing independent versions with bounded, resource-specific concurrency;
+- recording its own behavior (spans, metrics) so a run's timing and concurrency are answerable from what it recorded, not just inferred.
 
 The downloader never owns downstream semantic interpretation of GTFS data.
 
@@ -609,8 +734,41 @@ The `latest` symlink is the durable current-version pointer.
 
 ---
 
+## Design Evolution
+
+V2 was built as a deliberately incremental, 12-phase evolution from V1 (single semaphore, no durable per-version state, wholesale staging wipe on every restart, no observability) — never more than one phase's worth of change without review. The original mid-plan direction (Phase 7: replace the global execution lock with per-version worker ownership, leases, heading toward a Redis-ready distributed design) was cut entirely by a roadmap revision before any of it was built, in favor of the local-first phases this document describes: observability, benchmarking, reliability hardening, an architecture review, performance tuning, and this finalization. That pivot, the reasoning behind it, and every phase's own review discussion are recorded in full in [IMPL-001](../implementation/IMPL-001-gtfs-static-downloader-V1.md); this document states only where that process landed.
+
+The architecture review (implementation-plan Phase 10) concluded the local, single-process design is sufficient for the actual workload: no failure mode, concurrency edge case, or performance question encountered across the whole process required a mechanism this architecture doesn't already have.
+
+---
+
+## Known Limitations
+
+- **OTLP (or any real remote) export does not exist yet.** Only a stdout exporter is implemented; sending telemetry to a collector or hosted backend is a deliberately deferred, not-yet-needed addition (see [Observability Workflow](#observability-workflow)).
+- **No live queue-depth gauge.** Queue *wait time* is recorded instead — equivalent information for this process's lifecycle (metrics export exactly once, at shutdown, by which point a live depth reading would be meaningless anyway), but a genuinely live gauge would need `crate::queue` to expose its current backlog size, which it doesn't today.
+- **The download-concurrency finding is validated at two synthetic cost ratios (~2.6% and ~25-33% CPU share), not measured directly in production.** Both point the same direction (no benefit from lowering `GTFS_S_MAX_CONCURRENT_DOWNLOADS`); a real trace under a different concurrency setting was deliberately not gathered — production is for validating decisions after the fact, not for running tuning experiments (see [Benchmark Methodology & Results](#benchmark-methodology--results)).
+- **Concurrency default values are unmeasured-but-reasonable, not exhaustively tuned.** Phase 11 tested one specific hypothesis (download concurrency vs. bandwidth contention) and found no change warranted; it did not sweep every knob against every workload shape.
+- **CPU model, RAM, kernel, filesystem, and CPU governor are captured for benchmark runs; instantaneous CPU frequency is not** — deliberately, since it changes continuously under normal turbo/thermal behavior and one startup sample would imply false precision.
+
+---
+
+## V3 Considerations
+
+Recorded for future reference only — none of this is designed, scheduled, or implied as upcoming work by this document:
+
+- Local filesystem → object storage for durable snapshots.
+- Local single-invocation execution → a long-running server process or a Lambda-style deployment.
+- Local cron-style scheduling → cloud-native scheduling.
+- Local durable `.work`/sidecar state → a remote persistence layer, if a single local filesystem stops being sufficient.
+- A real OTLP export backend, once a consuming collector or hosted backend actually exists to send telemetry to.
+
+If any of these become real requirements, they warrant a fresh design pass against the actual requirement at the time — not an extrapolation from this document's V2 assumptions.
+
+---
+
 ## See Also
 
+- [IMPL-001: GTFS Static Downloader V2 — Implementation Log](../implementation/IMPL-001-gtfs-static-downloader-V1.md) — the full phase-by-phase record behind this document: what was tried, measured, reversed, and why, including the real production trace and benchmark data behind [Benchmark Methodology & Results](#benchmark-methodology--results).
 - [Runbook: Downloading the Swiss GTFS Static Timetable](../runbooks/gtfs-static-timetable-download.md) — the manual process this component replaces and the upstream feed reference.
 - [ADR 0011 — GTFS Static Preprocessing and Zurich Operational Subset Strategy](../adr/0011-gtfs-static-preprocessing-and-zurich-subset-strategy.md) — defines the downstream operational subset and its processing assumptions.
 - [C4 Model — Ingestion](../architecture/c4/ingestion.md) — the container/component structure surrounding the `ckan` crate.
@@ -621,21 +779,25 @@ The `latest` symlink is the durable current-version pointer.
 
 ## Status
 
-**Implemented.**
+**Implemented — V2, finalized.**
 
 The `ckan` crate currently implements:
 
 - CKAN-based version discovery;
 - authenticated source access;
-- archive verification;
+- reconciliation of upstream discovery, durable per-version work state, and filesystem-installed state;
+- durable per-version state (`DISCOVERED → QUEUED → RUNNING → PUBLISHED`/`FAILED`), independent of process memory;
+- archive verification, including checksum-mismatch and CRC-corruption rejection;
 - archive-level GTFS structural validation;
 - CSV-to-Parquet conversion;
-- atomic snapshot publication;
+- atomic snapshot publication, including safe reprocessing of a directory orphaned by a crash between rename and sidecar write;
 - snapshot sidecars and manifest rebuilding;
 - monotonic `latest` management;
 - updater locking and stale-lock recovery;
-- crash-safe staging cleanup;
-- bounded version-level concurrency using `Arc<Semaphore>` and `JoinSet`;
+- stage-aware crash recovery — an interrupted version resumes from wherever it actually got to, not from scratch;
+- a bounded local work queue, a fixed worker pool, and two independent resource-specific concurrency pools (download vs. processing);
+- OpenTelemetry-compatible tracing and metrics (spans, counters, histograms, peak-concurrency gauges), exported to stdout today;
+- two frozen, reproducible end-to-end benchmark workloads plus a bandwidth-simulating experiment harness;
 - `spawn_blocking` for extraction and Parquet conversion.
 
-The design intentionally documents the system as it exists today. Downstream transformation, semantic validation, and consumer cutover are separate concerns and are not represented as implemented behavior here.
+This design intentionally documents the system as it exists today, at the close of V2's 12-phase implementation plan. Downstream transformation, semantic validation, consumer cutover, and any distributed or cloud-deployed future architecture are separate concerns, deliberately not represented as implemented (or even designed) behavior here — see [V3 Considerations](#v3-considerations).
