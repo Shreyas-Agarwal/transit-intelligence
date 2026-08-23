@@ -33,18 +33,23 @@
 //! touches the two new environment variables sees no behavior change at all.
 //!
 //! Phase 7 adds one more thing: each pool reports how many permits are
-//! currently in use as an OpenTelemetry gauge-like counter, so "how much of
-//! the configured download/processing concurrency is actually being used"
-//! is answered by a metric, not just by reading the configured limit. This
-//! module records its own utilization — that's what it manages — but knows
-//! nothing about GTFS, spans, or why the permits exist; see `ckan::telemetry`
-//! for the pipeline-level metrics built on top.
+//! currently in use as a metric, so "how much of the configured
+//! download/processing concurrency is actually being used" is answered by a
+//! metric, not just by reading the configured limit. This module records its
+//! own utilization — that's what it manages — but knows nothing about GTFS,
+//! spans, or why the permits exist; see `ckan::telemetry` for the
+//! pipeline-level metrics built on top (including
+//! `telemetry::ConcurrencyGauge`, the histogram-backed tracker these two
+//! pools are recorded with — see its doc comment for why a plain
+//! `UpDownCounter` doesn't work for a process that exports metrics once, at
+//! shutdown).
 
 use std::future::Future;
 use std::sync::Arc;
 
-use opentelemetry::metrics::UpDownCounter;
 use tokio::sync::Semaphore;
+
+use crate::telemetry::ConcurrencyGauge;
 
 /// Two independent resource pools, shared by every worker in a run. Cheap to
 /// clone — each field is reference-counted — so every worker gets its own
@@ -54,28 +59,28 @@ use tokio::sync::Semaphore;
 pub struct ResourcePermits {
     download: Arc<Semaphore>,
     processing: Arc<Semaphore>,
-    download_in_use: UpDownCounter<i64>,
-    processing_in_use: UpDownCounter<i64>,
+    download_in_use: ConcurrencyGauge,
+    processing_in_use: ConcurrencyGauge,
 }
 
-/// Decrements `counter` when dropped — released on every exit path (normal
+/// Decrements `gauge` when dropped — released on every exit path (normal
 /// return, early error return, or the holding task being cancelled) the same
 /// way the semaphore permit itself is, since both are just values going out
 /// of scope.
 struct InUseGuard<'a> {
-    counter: &'a UpDownCounter<i64>,
+    gauge: &'a ConcurrencyGauge,
 }
 
 impl<'a> InUseGuard<'a> {
-    fn enter(counter: &'a UpDownCounter<i64>) -> Self {
-        counter.add(1, &[]);
-        Self { counter }
+    fn enter(gauge: &'a ConcurrencyGauge) -> Self {
+        gauge.increment();
+        Self { gauge }
     }
 }
 
 impl Drop for InUseGuard<'_> {
     fn drop(&mut self) {
-        self.counter.add(-1, &[]);
+        self.gauge.decrement();
     }
 }
 
@@ -85,16 +90,22 @@ impl ResourcePermits {
         Self {
             download: Arc::new(Semaphore::new(max_concurrent_downloads.max(1))),
             processing: Arc::new(Semaphore::new(max_concurrent_processing.max(1))),
-            download_in_use: meter
-                .i64_up_down_counter("gtfs_s.concurrency.download_permits_in_use")
-                .with_description("downloads currently in flight, out of the configured limit")
-                .build(),
-            processing_in_use: meter
-                .i64_up_down_counter("gtfs_s.concurrency.processing_permits_in_use")
-                .with_description(
-                    "extract/convert stages currently running, out of the configured limit",
-                )
-                .build(),
+            download_in_use: ConcurrencyGauge::new(
+                meter
+                    .u64_histogram("gtfs_s.concurrency.download_permits_in_use")
+                    .with_description(
+                        "downloads in flight at once; max is peak concurrency reached this run, out of the configured limit",
+                    )
+                    .build(),
+            ),
+            processing_in_use: ConcurrencyGauge::new(
+                meter
+                    .u64_histogram("gtfs_s.concurrency.processing_permits_in_use")
+                    .with_description(
+                        "extract/convert stages running at once; max is peak concurrency reached this run, out of the configured limit",
+                    )
+                    .build(),
+            ),
         }
     }
 

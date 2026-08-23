@@ -22,8 +22,72 @@
 //! explicit value, the same way `crate::concurrency::ResourcePermits` is
 //! constructed once and threaded through by reference, rather than reaching
 //! back into global state themselves.
+//!
+//! # Why concurrency is tracked as a histogram, not an `UpDownCounter`
+//! (Phase 11 correction)
+//!
+//! [`ConcurrencyGauge`] backs `active_workers` here and
+//! `crate::concurrency::ResourcePermits`'s own two in-use trackers. All
+//! three used to be plain `UpDownCounter`s — the obvious choice for "how
+//! many of X are happening right now." That choice was wrong for this
+//! process's lifecycle: this binary runs once, exits, and — per
+//! `ti_common::observability`'s own design — exports metrics exactly once,
+//! at shutdown. By the time that export happens, every run has already
+//! finished, so every `UpDownCounter` has already been decremented back to
+//! zero. A real production run confirmed this directly: `workers.active`,
+//! `download_permits_in_use`, and `processing_permits_in_use` all reported
+//! `0` despite the same run's own queue-wait histogram proving real
+//! concurrency had genuinely happened. The counters weren't lying about
+//! that run; they were structurally incapable of ever showing anything but
+//! the final value, for any run, forever.
+//!
+//! Recording every increment/decrement as a histogram sample instead fixes
+//! this without changing when metrics are exported: the histogram's `max`
+//! is the peak concurrency actually reached during the run, not a snapshot
+//! of whatever the count happened to be at one specific instant.
 
-use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use opentelemetry::metrics::{Counter, Histogram};
+
+/// Tracks a live "how many of X are happening right now" count, recording
+/// every transition as a histogram sample rather than exposing only the
+/// current value — see the module doc comment for why that distinction is
+/// the whole point. Cheap to clone: the counter and the histogram handle
+/// are both reference-counted.
+#[derive(Clone)]
+pub struct ConcurrencyGauge {
+    current: Arc<AtomicI64>,
+    histogram: Histogram<u64>,
+}
+
+impl ConcurrencyGauge {
+    pub fn new(histogram: Histogram<u64>) -> Self {
+        Self {
+            current: Arc::new(AtomicI64::new(0)),
+            histogram,
+        }
+    }
+
+    pub fn increment(&self) {
+        let value = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+        self.record(value);
+    }
+
+    pub fn decrement(&self) {
+        let value = self.current.fetch_sub(1, Ordering::SeqCst) - 1;
+        self.record(value);
+    }
+
+    fn record(&self, value: i64) {
+        // Never negative in practice (increment/decrement are always
+        // paired), but a histogram sample can't be negative by type — clamp
+        // rather than let an unexpected imbalance produce a nonsensical cast.
+        #[allow(clippy::cast_sign_loss)]
+        self.histogram.record(value.max(0) as u64, &[]);
+    }
+}
 
 /// Cheap to clone: every field is itself a reference-counted handle to the
 /// same underlying instrument (see each `opentelemetry::metrics` type's own
@@ -39,7 +103,7 @@ pub struct Metrics {
     pub stale_running_recovered: Counter<u64>,
     pub queue_wait_seconds: Histogram<f64>,
     pub version_duration_seconds: Histogram<f64>,
-    pub active_workers: UpDownCounter<i64>,
+    pub active_workers: ConcurrencyGauge,
 }
 
 impl Metrics {
@@ -81,10 +145,14 @@ impl Metrics {
                 .with_unit("s")
                 .with_description("total processing time for one version, claim through complete")
                 .build(),
-            active_workers: meter
-                .i64_up_down_counter("gtfs_s.workers.active")
-                .with_description("versions currently being processed by a worker")
-                .build(),
+            active_workers: ConcurrencyGauge::new(
+                meter
+                    .u64_histogram("gtfs_s.workers.active")
+                    .with_description(
+                        "versions being processed by a worker at once; max is peak concurrency reached this run",
+                    )
+                    .build(),
+            ),
         }
     }
 }

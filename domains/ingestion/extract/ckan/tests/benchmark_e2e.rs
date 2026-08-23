@@ -31,24 +31,32 @@
 //! Archive size is anchored to `docs/design/gtfs-static-auto-downloader.md`
 //! §"Benchmark", which documents real GTFS-S archives from
 //! opentransportdata.swiss as ~150-300 MB each — not to the much smaller
-//! (~3 MB) synthetic fixture size this crate's tests and
-//! `benchmark_concurrent.rs` use elsewhere for speed. An earlier version of
-//! this benchmark used that same ~3 MB fixture size, which is fine for
-//! correctness tests but understates real download/staging cost by roughly
-//! two orders of magnitude — not a bug in the numbers it reported, but a
-//! workload that was never representative of production traffic in the
-//! first place. `REPRESENTATIVE` and `SATURATION` both target the low end of
-//! the documented range (~150 MB), a deliberate reproducibility/runtime
-//! trade-off recorded in the implementation log rather than assumed.
+//! (~3 MB) synthetic fixture size this crate's correctness tests use
+//! elsewhere for speed. An earlier version of this benchmark used that same
+//! ~3 MB fixture size, which is fine for correctness tests but understates
+//! real download/staging cost by roughly two orders of magnitude — not a bug
+//! in the numbers it reported, but a workload that was never representative
+//! of production traffic in the first place. `REPRESENTATIVE` and
+//! `SATURATION` both target the low end of the documented range (~150 MB), a
+//! deliberate reproducibility/runtime trade-off recorded in the
+//! implementation log rather than assumed.
 //!
 //! Run with:
 //!   cargo test -p ckan --test benchmark_e2e -- --ignored --nocapture
 //!
-//! Not run in CI by default (same convention as `benchmark_concurrent.rs`)
-//! — this generates real, sizable synthetic archives and measures real
-//! elapsed wall-clock time, which a shared CI machine's variable load makes
-//! unsuitable as a pass/fail gate. `SATURATION` in particular is slow by
-//! design (see below) and is meant to be run deliberately, not routinely.
+//! Not run in CI by default — this generates real, sizable synthetic
+//! archives and measures real elapsed wall-clock time, which a shared CI
+//! machine's variable load makes unsuitable as a pass/fail gate.
+//! `SATURATION` in particular is slow by design (see below) and is meant to
+//! be run deliberately, not routinely.
+//!
+//! (A predecessor of this file, `benchmark_concurrent.rs`, measured
+//! sequential-vs-concurrent throughput on a hand-rolled mini-pipeline that
+//! bypassed the actual Claim/Verify/Publish state machine, the real bounded
+//! queue, and real resource permits entirely — it predated most of what
+//! Phases 1–7 built. Phase 10's architecture review removed it: this
+//! benchmark answers the same underlying question, against the real
+//! pipeline, more completely.)
 //!
 //! # What this is NOT
 //!
@@ -60,6 +68,7 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ckan::ckan_client::CkanClient;
@@ -97,6 +106,14 @@ struct Workload {
     /// Independent repetitions of the whole invocation.
     repetitions: usize,
     concurrency: ConcurrencyConfig,
+    /// Aggregate bytes/second every concurrent download in one iteration
+    /// shares, simulating one real, finite network link — `None` means
+    /// unlimited (the loopback fixture servers' natural, effectively
+    /// infinite throughput). See [`BandwidthLimiter`] and the "Phase 11"
+    /// module doc section for why `REPRESENTATIVE`/`SATURATION` leaving this
+    /// `None` is a real, acknowledged blind spot for anything involving
+    /// `max_concurrent_downloads`, not an oversight.
+    bandwidth_bytes_per_second: Option<u64>,
 }
 
 /// A normal catch-up run: a handful of real-sized archives, at the default
@@ -108,6 +125,7 @@ const REPRESENTATIVE: Workload = Workload {
     rows_per_file: 2_600_000,
     repetitions: 3,
     concurrency: DEFAULT_CONCURRENCY,
+    bandwidth_bytes_per_second: None,
 };
 
 /// A backlog large enough to fill the bounded queue to capacity while every
@@ -125,7 +143,107 @@ const SATURATION: Workload = Workload {
     rows_per_file: 2_600_000,
     repetitions: 1,
     concurrency: DEFAULT_CONCURRENCY,
+    bandwidth_bytes_per_second: None,
 };
+
+// -- Download-concurrency experiment (implementation plan Phase 11) --------
+//
+// A real production run (recorded in the implementation log) showed
+// Download, not Convert, dominating per-version wall time — 59-83% of it —
+// and showed download throughput rising sharply for versions that started
+// downloading later, once fewer *other* downloads were still competing for
+// the same real connection. `REPRESENTATIVE`/`SATURATION` cannot see this at
+// all: their loopback fixture servers have no bandwidth model, so
+// `max_concurrent_downloads` never has anything real to contend over there.
+//
+// These two workloads share everything — six ~20 MiB archives, a 2 MB/s
+// aggregate bandwidth cap simulating one shared link — except
+// `max_concurrent_downloads`, isolating that one variable per the plan's own
+// "change ONE thing" rule. Archive size and bandwidth are both scaled down
+// from the real run (~213 MB archives, ~4.8 MB/s aggregate observed
+// throughput) by roughly the same factor, to keep each run's wall-clock
+// tractable (well under two minutes) while preserving the real run's
+// approximate bytes-to-bandwidth ratio — the ratio that actually determines
+// how much the download phase can overlap with CPU-bound work, which is the
+// effect under test.
+const DOWNLOAD_CONTENTION_BYTES_PER_SECOND: u64 = 2_000_000;
+const DOWNLOAD_CONTENTION_ROWS_PER_FILE: usize = 340_000;
+
+/// Baseline: `max_concurrent_downloads` equal to `max_concurrent_versions`
+/// (today's default relationship) — every active worker always gets its own
+/// download permit immediately, so this pool never binds independently of
+/// the worker pool at all.
+const DOWNLOAD_CONTENTION_BASELINE: Workload = Workload {
+    name: "download-contention-baseline (max_concurrent_downloads=4)",
+    versions: 6,
+    rows_per_file: DOWNLOAD_CONTENTION_ROWS_PER_FILE,
+    repetitions: 1,
+    concurrency: DEFAULT_CONCURRENCY,
+    bandwidth_bytes_per_second: Some(DOWNLOAD_CONTENTION_BYTES_PER_SECOND),
+};
+
+/// The one change: `max_concurrent_downloads` lowered to half the worker
+/// pool size, so at most 2 downloads ever compete for the shared bandwidth
+/// cap at once, hypothesized to let early-finishing archives start
+/// Extract/Convert sooner and overlap with still-downloading ones, rather
+/// than every active worker's download finishing in one bunched batch.
+const DOWNLOAD_CONTENTION_REDUCED: Workload = Workload {
+    name: "download-contention-reduced (max_concurrent_downloads=2)",
+    versions: 6,
+    rows_per_file: DOWNLOAD_CONTENTION_ROWS_PER_FILE,
+    repetitions: 1,
+    concurrency: ConcurrencyConfig {
+        max_concurrent_downloads: 2,
+        ..DEFAULT_CONCURRENCY
+    },
+    bandwidth_bytes_per_second: Some(DOWNLOAD_CONTENTION_BYTES_PER_SECOND),
+};
+
+/// A shared, aggregate bandwidth cap simulating one real, finite network
+/// link that every concurrent download in one benchmark iteration competes
+/// for. A plain token bucket: tokens (bytes) accumulate continuously at
+/// `bytes_per_second`, capped at one second's worth of burst, and
+/// `consume` blocks until enough are available.
+struct BandwidthLimiter {
+    bytes_per_second: f64,
+    state: tokio::sync::Mutex<(f64, Instant)>,
+}
+
+impl BandwidthLimiter {
+    fn new(bytes_per_second: u64) -> Arc<Self> {
+        let bytes_per_second = bytes_per_second as f64;
+        Arc::new(Self {
+            bytes_per_second,
+            state: tokio::sync::Mutex::new((bytes_per_second, Instant::now())),
+        })
+    }
+
+    async fn consume(&self, bytes: usize) {
+        loop {
+            let wait = {
+                let mut guard = self.state.lock().await;
+                let (tokens, last) = &mut *guard;
+                let now = Instant::now();
+                *tokens = (*tokens
+                    + now.duration_since(*last).as_secs_f64() * self.bytes_per_second)
+                    .min(self.bytes_per_second);
+                *last = now;
+                if *tokens >= bytes as f64 {
+                    *tokens -= bytes as f64;
+                    None
+                } else {
+                    Some(Duration::from_secs_f64(
+                        (bytes as f64 - *tokens) / self.bytes_per_second,
+                    ))
+                }
+            };
+            match wait {
+                None => return,
+                Some(d) => tokio::time::sleep(d).await,
+            }
+        }
+    }
+}
 
 fn build_synthetic_zip_bytes(rows_per_file: usize) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -176,13 +294,57 @@ async fn serve_one_response(body: Vec<u8>) -> String {
     format!("http://{addr}")
 }
 
+/// Same as [`serve_one_response`], except the body is written in chunks,
+/// each drawn from `limiter`'s shared budget first — simulating one real,
+/// bandwidth-limited connection instead of loopback's effectively infinite
+/// one.
+async fn serve_download_rate_limited(body: Vec<u8>, limiter: Arc<BandwidthLimiter>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(header.as_bytes()).await.unwrap();
+        const CHUNK: usize = 32 * 1024;
+        for chunk in body.chunks(CHUNK) {
+            limiter.consume(chunk.len()).await;
+            socket.write_all(chunk).await.unwrap();
+        }
+        let _ = socket.shutdown().await;
+    });
+    format!("http://{addr}")
+}
+
 /// Starts one fixture download server per version and one fixture CKAN
 /// `package_show` server listing all of them — the whole discoverable
-/// workload for one benchmark iteration.
-async fn serve_fixture_workload(zip_bytes: &[u8], versions: &[String]) -> String {
+/// workload for one benchmark iteration. When `limiter` is set, every
+/// download server draws from the same shared bandwidth budget; the
+/// `package_show` response itself is never rate-limited (it's a few hundred
+/// bytes of JSON, not the thing under test).
+async fn serve_fixture_workload(
+    zip_bytes: &[u8],
+    versions: &[String],
+    limiter: Option<&Arc<BandwidthLimiter>>,
+) -> String {
     let mut resources = Vec::with_capacity(versions.len());
     for version in versions {
-        let base = serve_one_response(zip_bytes.to_vec()).await;
+        let base = match limiter {
+            Some(limiter) => {
+                serve_download_rate_limited(zip_bytes.to_vec(), Arc::clone(limiter)).await
+            }
+            None => serve_one_response(zip_bytes.to_vec()).await,
+        };
         resources.push(serde_json::json!({
             "url": format!("{base}/gtfs_fp2026_{version}.zip"),
             "format": "zip",
@@ -233,7 +395,10 @@ async fn run_one_iteration(
     let versions: Vec<String> = (1..=workload.versions)
         .map(|i| format!("2026{:02}{:02}", (iteration % 12) + 1, i))
         .collect();
-    let api_url = serve_fixture_workload(zip_bytes, &versions).await;
+    let limiter = workload
+        .bandwidth_bytes_per_second
+        .map(BandwidthLimiter::new);
+    let api_url = serve_fixture_workload(zip_bytes, &versions, limiter.as_ref()).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let layout = RawLayout::new(tmp.path().to_path_buf());
@@ -469,4 +634,16 @@ fn representative_workload_baseline() {
 #[ignore = "wall-clock E2E benchmark; slow by design (12 real-sized archives) — run with -- --ignored --nocapture saturation_workload_baseline"]
 fn saturation_workload_baseline() {
     run_workload(&SATURATION);
+}
+
+#[test]
+#[ignore = "wall-clock E2E benchmark; run with -- --ignored --nocapture download_concurrency_experiment_baseline"]
+fn download_concurrency_experiment_baseline() {
+    run_workload(&DOWNLOAD_CONTENTION_BASELINE);
+}
+
+#[test]
+#[ignore = "wall-clock E2E benchmark; run with -- --ignored --nocapture download_concurrency_experiment_reduced"]
+fn download_concurrency_experiment_reduced() {
+    run_workload(&DOWNLOAD_CONTENTION_REDUCED);
 }

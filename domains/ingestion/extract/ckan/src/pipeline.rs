@@ -415,7 +415,7 @@ pub async fn run(
                 );
 
                 async move {
-                    metrics.active_workers.add(1, &[]);
+                    metrics.active_workers.increment();
                     let version_started = Instant::now();
                     // `process_snapshot` marks its own current span (this
                     // `version` span, since it's the one `.instrument()`s
@@ -428,7 +428,7 @@ pub async fn run(
                     metrics
                         .version_duration_seconds
                         .record(version_started.elapsed().as_secs_f64(), &[]);
-                    metrics.active_workers.add(-1, &[]);
+                    metrics.active_workers.decrement();
                     outcome
                 }
                 .instrument(version_span)
