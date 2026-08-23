@@ -208,4 +208,107 @@ All new; nothing existing was modified.
 
 ---
 
-**WAITING FOR APPROVAL** to begin Phase 2 (reconciliation scheduler).
+**Phase 1 review resolved:**
+
+1. `.work/<version>.json` location — approved as-is.
+2. `recover_stale_running` remaining uncalled until Phase 2 — confirmed.
+3. `worker_id: Option<String>` freeform for now — approved. **Decision carried forward to Phase 7:** when lease-based worker ownership is introduced, `worker_id` should represent a *stable execution identity* — e.g. `hostname+PID`, a UUID, or a worker-instance ID — not an arbitrary label. Recorded here so Phase 7 doesn't have to re-derive this from scratch.
+
+Approved. Proceeded to Phase 2.
+
+---
+
+## Phase 2 — Reconciliation scheduler
+
+### Implemented
+
+A new `ckan::reconcile` module implementing the `discover() → reconcile() → durable work state → eligible work` architecture, built entirely on top of Phase 1's `work_state` module. As in Phase 1, this is additive: `pipeline.rs`'s existing discover/download/publish flow is completely untouched. Wiring the reconciler's `eligible` output into an actual execution path (replacing `pipeline::run`'s direct-spawn loop) is Phase 3's job, per the plan's own architecture diagram (`reconciler → bounded queue → worker tasks`).
+
+`reconcile()` is a single pure function:
+
+```rust
+pub fn reconcile(
+    resources: &[UpstreamResource],              // from ckan_client::list_gtfs_zip_resources (unchanged)
+    cutoff_version: Option<&VersionId>,
+    installed: &BTreeMap<VersionId, SnapshotMeta>, // from manifest::scan_sidecars (unchanged) — filesystem authority
+    states: BTreeMap<VersionId, VersionWork>,      // from work_state::scan_work_states (Phase 1)
+    now: DateTime<Utc>,
+) -> ReconcileOutcome
+```
+
+It performs no I/O. Callers scan durable state in (`work_state::scan_work_states`, `manifest::scan_sidecars`) and are expected to persist `ReconcileOutcome.states` back out; `ReconcileOutcome.eligible` is the ordered (oldest-first) list of versions now `QUEUED` and ready to be claimed this pass.
+
+Reconciliation rules implemented, in the order they're applied:
+
+1. **Stale RUNNING recovery runs first**, unconditionally, via Phase 1's `work_state::recover_stale_running` — before any upstream resource is even considered. This guarantees no `Running` record can still exist by the time individual versions are reconciled.
+2. **Below cutoff → ignored.** No record created; an existing record for an ignored version is left completely untouched (not deleted, not touched at all) rather than assumed irrelevant.
+3. **Filesystem-installed → forced to `Published`**, unconditionally, via the new `VersionWork::reconcile_as_published` (see below) — regardless of whatever the control plane currently believes (`Discovered`/`Queued`/`Failed`/no record at all). This is the "filesystem overrides stale control-plane assumptions" rule, and also how a pre-existing snapshot (predating this control plane, or Phase 0's system before Phase 1/2 existed) gets bootstrapped into the model with zero migration step.
+4. **No record + not installed → first discovery**: `Discovered` then immediately `Queued` in the same pass, eligible.
+5. **Already `Queued` (including just-recovered-from-stale-Running) → stays `Queued`, eligible again.** No duplicate record is created.
+6. **`Failed` + not installed → retried**: `Failed → Queued`, eligible. `last_error` is deliberately left in place until the next attempt actually starts (Phase 1's `start()` clears it) — retrying doesn't erase the diagnostic.
+7. **`Published` (control plane) but not installed (filesystem) → flagged, not auto-resolved.** Recorded in `diverged_published_without_filesystem` and left completely untouched. This case isn't explicitly named in the plan's rule list, but follows directly from "filesystem is authoritative" colliding with "don't guess" (the same philosophy behind `pipeline::verify_latest_consistency`'s existing fail-loudly behavior): if the control plane says done but the data plane disagrees, the right move is to surface it for investigation, not to silently pick a side.
+
+One new primitive was added to `work_state.rs` to support rule 3: `VersionWork::reconcile_as_published(now)`. Every other Phase 1 method routes through the strict transition graph; this one is a deliberate, documented bypass — it forces `state = Published` from *any* prior state (a no-op if already `Published`), because it represents an outside observation of ground truth overriding the control plane's own bookkeeping, not a normal lifecycle step. It preserves `attempt`/`last_error` (a filesystem observation doesn't get to rewrite this control plane's attempt history) but clears `worker_id` and stamps `completed_at`, matching `publish()`'s semantics for those two fields.
+
+### Files Changed
+
+- `domains/ingestion/extract/ckan/src/reconcile.rs` (new) — `reconcile()`, `ReconcileOutcome`, 12 inline unit tests.
+- `domains/ingestion/extract/ckan/tests/reconcile.rs` (new) — 3 end-to-end disk-restart integration tests.
+- `domains/ingestion/extract/ckan/src/work_state.rs` — added `reconcile_as_published()` plus 3 inline unit tests for it.
+- `domains/ingestion/extract/ckan/src/lib.rs` — registered `pub mod reconcile;`.
+
+`pipeline.rs`, `paths.rs`, and every other Phase 0/1 file are unchanged.
+
+### Tests Added / Updated
+
+18 new tests; nothing existing modified.
+
+| Test | Proves |
+|---|---|
+| `a_version_with_no_prior_record_is_discovered_and_queued` | first discovery |
+| `a_version_already_queued_stays_queued_and_eligible_without_duplication` | already-known versions, no duplicate record |
+| `an_already_published_version_with_matching_filesystem_state_is_a_noop` | already-published versions — byte-for-byte unchanged, not just same state |
+| `a_failed_version_not_yet_installed_is_retried` | retryable failure, `last_error` preserved until next attempt |
+| `a_stale_running_version_is_recovered_to_queued_and_eligible` | stale running work recovered and re-offered |
+| `a_version_below_cutoff_is_ignored_and_gets_no_record` | cutoff behavior |
+| `cutoff_does_not_disturb_an_existing_record_for_an_old_version` | an ignored version's existing record is left untouched, not deleted |
+| `an_installed_filesystem_snapshot_with_no_control_record_bootstraps_as_published` | filesystem overriding a missing control-plane record |
+| `an_installed_filesystem_snapshot_overrides_a_failed_control_record` | filesystem overriding a stale `Failed` belief |
+| `an_installed_filesystem_snapshot_overrides_a_queued_control_record` | filesystem overriding a stale `Queued` belief |
+| `a_published_control_record_without_filesystem_backing_is_flagged_not_requeued` | divergence is surfaced, not silently auto-resolved either way |
+| `reconciling_twice_with_the_same_inputs_is_idempotent` | pure-function stability — same inputs, same outcome |
+| `reconcile_as_published_forces_state_from_any_non_published_state` (work_state) | the override works from every non-Published state |
+| `reconcile_as_published_preserves_attempt_and_last_error_history` (work_state) | the override doesn't rewrite attempt/error history |
+| `reconcile_as_published_on_an_already_published_record_is_a_noop` (work_state) | idempotence matches `publish()`'s guarantee |
+| `restart_reconstructs_pending_work_purely_from_durable_state` (integration) | end-to-end: run 1 queues+starts a version and "crashes" (leaves it `Running` on disk); run 2 is a fresh scan from disk with no in-memory carryover and correctly recovers + re-offers it |
+| `restart_recognizes_a_filesystem_published_snapshot_without_replaying_history` (integration) | a sidecar-only snapshot with zero control-plane history is recognized as `Published` on first scan, never queued |
+| `two_passes_separated_by_a_full_persist_and_rescan_agree` (integration) | the disposability property end-to-end through real disk I/O, not just in-memory |
+
+### Validation
+
+- `cargo fmt --check`: clean.
+- `cargo check --workspace --all-targets`: clean, no warnings.
+- `cargo clippy --workspace --all-targets`: same 2 pre-existing style warnings as Phase 0/1 (both in `pipeline_concurrent.rs`), nothing new.
+- `cargo test -p ckan`: **65 passed, 0 failed, 3 ignored** (unchanged benchmarks). Up from 47 in Phase 1 — 18 new tests, zero regressions across all of Phase 0's original 34 and Phase 1's 13.
+
+### Architectural Notes
+
+- **The Phase 1 "seam" about `name_prefix` turned out not to apply.** The Phase 1 report flagged a risk that `VersionWork` would need `UpstreamResource`'s `name_prefix` to compute a snapshot directory name for filesystem reconciliation. It doesn't: `manifest::scan_sidecars` already returns a `BTreeMap<VersionId, SnapshotMeta>` keyed by `VersionId` directly, so "is this version installed" is a plain `installed.contains_key(&version)` check — exactly what `pipeline::run` already does today. `VersionWork` only needs to track control-plane state, never path/directory naming (that stays entirely the data plane's concern, in `SnapshotMeta`/`RawLayout`). Noting the resolution explicitly since the original phase report raised it as an open risk.
+- **`reconcile_as_published` is an intentional, narrow widening of the Phase 1 FSM**, not a hole in it. Phase 1's `every_illegal_transition_is_rejected` test still holds for the entire normal lifecycle surface (`queue`/`start`/`publish`/`fail`/`retry`); this new method is a separate, explicitly-named escape hatch used only when reconciling against filesystem ground truth, and is itself fully tested (idempotence, history preservation, works from every prior state). Flagging this transparently rather than letting it look like scope creep on Phase 1's invariants.
+- **The divergence case (`Published` control state, no filesystem backing) is new territory the plan's rule list didn't explicitly enumerate.** The chosen behavior — surface via `diverged_published_without_filesystem`, touch nothing — follows the same "fail loudly / don't guess" philosophy as `pipeline::verify_latest_consistency`'s existing `latest`-vs-manifest mismatch handling. An alternative (auto-requeue a diverged `Published` record) was considered and rejected: it would require a `Published → Queued` transition that doesn't exist in the Phase 1 graph, and per DD-001 "manual manipulation of snapshot directories... is not part of normal operation," so this state should be rare and worth a human look rather than silent self-repair.
+- **`reconcile()` still has no caller.** Like `recover_stale_running` after Phase 1, it's proven correct in isolation (including two full disk-restart integration tests) but isn't yet invoked from `pipeline::run`. Wiring it in is explicitly deferred to Phase 3, where the reconciler's `eligible` list becomes the producer side of the bounded work queue.
+
+### Deviations / Risks
+
+- None from the plan's Phase 2 scope.
+- Carried-forward risk for Phase 3: once `reconcile()` is wired into `pipeline::run`, the existing `pending.sort_by(...)` / semaphore-spawn loop in `pipeline.rs` will need to be replaced by something that consumes `ReconcileOutcome.eligible` and turns each version back into an `UpstreamResource` (or equivalent) for `process_version` — `reconcile()` currently only tracks `VersionId` + `source_url`, not the full resource metadata (`name_prefix`, `upstream_hash`, `publisher_last_modified`) that `process_version` needs. That's fine for Phase 2 (a pure state-tracking exercise) but Phase 3 will need to decide whether the queue carries `VersionId` (looked back up against the discovered resource list) or the full `UpstreamResource`.
+
+### Review Questions
+
+1. The `diverged_published_without_filesystem` handling (surface-only, no auto-action) — confirm this is the right call, or would you prefer reconciliation to force such a record back to `Queued` for reprocessing instead?
+2. `reconcile_as_published` bypasses the Phase 1 transition graph by design. Any concern with this pattern (a narrow, explicitly-named override alongside a strict FSM) versus, say, adding `(Any, Published)` as a blanket-legal transition in the graph itself?
+3. Confirm Phase 3 should carry `VersionId` through the queue (re-deriving `UpstreamResource` details from the discovery pass as needed) rather than threading the full `UpstreamResource` through `ReconcileOutcome` — the former keeps `work_state`/`reconcile` decoupled from CKAN-specific resource shape, but means Phase 3's queue consumer needs access to the discovery result too.
+
+---
+
+**WAITING FOR APPROVAL** to begin Phase 3 (bounded in-process work queue).

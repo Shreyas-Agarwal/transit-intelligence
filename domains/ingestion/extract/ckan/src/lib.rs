@@ -14,5 +14,6 @@ pub mod manifest;
 pub mod parquet_convert;
 pub mod paths;
 pub mod pipeline;
+pub mod reconcile;
 pub mod symlink;
 pub mod work_state;

@@ -197,6 +197,34 @@ impl VersionWork {
         self.started_at = None;
         Ok(())
     }
+
+    /// Forces the record to PUBLISHED regardless of its current state, to
+    /// represent an outside observation of ground truth — an installed,
+    /// sidecar-verified filesystem snapshot (`crate::manifest::scan_sidecars`)
+    /// — rather than a normal lifecycle transition reached via `start`/
+    /// `publish`.
+    ///
+    /// Deliberately bypasses `transition`'s validity check. The filesystem
+    /// sidecar is authoritative for what is actually published (DD-001 §2):
+    /// if it disagrees with this record's control-plane state — e.g. the
+    /// record is still QUEUED, or FAILED, or has no record at all yet
+    /// (bootstrapping control-plane state for a pre-existing snapshot) —
+    /// the filesystem wins outright, unconditionally, rather than requiring
+    /// this record to have arrived at PUBLISHED through RUNNING first.
+    ///
+    /// A no-op if already PUBLISHED (same idempotence guarantee as
+    /// `publish`). Leaves `attempt` and `last_error` untouched: they
+    /// describe this control plane's own attempt history, which an outside
+    /// observation doesn't get to rewrite — only `state`, `worker_id`, and
+    /// `completed_at` are corrected.
+    pub fn reconcile_as_published(&mut self, now: DateTime<Utc>) {
+        if self.state == WorkState::Published {
+            return;
+        }
+        self.state = WorkState::Published;
+        self.worker_id = None;
+        self.completed_at = Some(now);
+    }
 }
 
 pub fn write_work_state(layout: &RawLayout, work: &VersionWork) -> std::io::Result<()> {
@@ -478,5 +506,52 @@ mod tests {
             states[&VersionId::parse("20260729").unwrap()].state,
             WorkState::Failed
         );
+    }
+
+    // -- reconcile_as_published (filesystem-observed override) -------------
+
+    #[test]
+    fn reconcile_as_published_forces_state_from_any_non_published_state() {
+        use WorkState::*;
+        for state in [Discovered, Queued, Running, Failed] {
+            let mut work = sample(state);
+            work.reconcile_as_published(now());
+            assert_eq!(
+                work.state, Published,
+                "reconcile_as_published must override {state:?}"
+            );
+            assert!(work.worker_id.is_none());
+            assert_eq!(work.completed_at, Some(now()));
+        }
+    }
+
+    #[test]
+    fn reconcile_as_published_preserves_attempt_and_last_error_history() {
+        let mut work = sample(WorkState::Failed);
+        assert_eq!(work.attempt, 1);
+        assert_eq!(work.last_error.as_deref(), Some("boom"));
+
+        work.reconcile_as_published(now());
+
+        assert_eq!(work.state, WorkState::Published);
+        assert_eq!(
+            work.attempt, 1,
+            "an outside observation doesn't rewrite attempt history"
+        );
+        assert_eq!(
+            work.last_error.as_deref(),
+            Some("boom"),
+            "an outside observation doesn't erase prior diagnostics"
+        );
+    }
+
+    #[test]
+    fn reconcile_as_published_on_an_already_published_record_is_a_noop() {
+        let mut work = sample(WorkState::Published);
+        let before = work.clone();
+
+        work.reconcile_as_published(now());
+
+        assert_eq!(work, before);
     }
 }
