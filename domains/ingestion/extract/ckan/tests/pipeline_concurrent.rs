@@ -21,8 +21,10 @@
 //!   others still succeed; failed version leaves no final dir.
 //! * [`concurrent_workers_use_isolated_staging_paths`]: two versions exercise
 //!   distinct staging paths end-to-end.
-//! * [`startup_wipes_partial_staging_from_multiple_crashed_versions`]: pre-existing
-//!   partial staging from multiple versions is cleaned at startup.
+//! * [`startup_sweeps_only_dot_part_files_leaving_resumable_staging_intact`]:
+//!   only unconditionally-unresumable `.zip.part` files are cleaned at
+//!   startup (Phase 6); everything else is left for per-version stage-aware
+//!   recovery (`crate::snapshot::find_resume_point`) to inspect.
 //! * [`manifest_is_consistent_after_mixed_success_failure_run`]: manifest is
 //!   internally consistent after a mixed run.
 
@@ -449,12 +451,12 @@ fn concurrent_workers_use_isolated_staging_paths() {
 /// `clean_staging` at startup wipes all partial artifacts left by a crashed run
 /// that had multiple concurrent versions in-flight.
 #[test]
-fn startup_wipes_partial_staging_from_multiple_crashed_versions() {
+fn startup_sweeps_only_dot_part_files_leaving_resumable_staging_intact() {
     let tmp = tempfile::tempdir().unwrap();
     let layout = RawLayout::new(tmp.path().to_path_buf());
 
-    // Plant partial staging artifacts simulating a crash mid-run with 3
-    // concurrent versions in various stages.
+    // Plant staging artifacts simulating a crash mid-run with 3 concurrent
+    // versions in various stages.
     let staging = layout.staging_dir();
     std::fs::create_dir_all(staging.join("gtfs_fp2026_20260805")).unwrap(); // mid-extract
     std::fs::create_dir_all(staging.join("gtfs_fp2026_20260805.parquet")).unwrap(); // mid-convert
@@ -462,20 +464,40 @@ fn startup_wipes_partial_staging_from_multiple_crashed_versions() {
     std::fs::create_dir_all(staging.join("gtfs_fp2026_20260812")).unwrap();
     std::fs::write(staging.join("gtfs_fp2026_20260819.zip.part"), b"in-flight").unwrap();
 
-    // Replicate clean_staging from pipeline.rs.
-    let staging = layout.staging_dir();
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).unwrap();
-    }
+    // Replicate the Phase 6 clean_staging from pipeline.rs: ensure the
+    // directory exists, sweep only `*.zip.part` entries.
     std::fs::create_dir_all(&staging).unwrap();
+    for entry in std::fs::read_dir(&staging).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
 
-    // Staging dir itself still exists (recreated) but is empty.
+    let remaining: Vec<String> = std::fs::read_dir(layout.staging_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
     assert!(
-        layout.staging_dir().exists(),
-        "staging dir must be recreated"
+        !remaining.iter().any(|n| n.ends_with(".zip.part")),
+        "a `.zip.part` file is never resumable and must always be swept: {remaining:?}"
     );
-    let entries: Vec<_> = std::fs::read_dir(layout.staging_dir()).unwrap().collect();
-    assert!(entries.is_empty(), "staging must be empty after cleanup");
+    assert!(
+        remaining.contains(&"gtfs_fp2026_20260805".to_string()),
+        "a possibly-resumable extraction directory must be left for find_resume_point to inspect"
+    );
+    assert!(
+        remaining.contains(&"gtfs_fp2026_20260805.parquet".to_string()),
+        "a possibly-resumable conversion directory must be left in place"
+    );
+    assert!(
+        remaining.contains(&"gtfs_fp2026_20260805.zip".to_string()),
+        "a possibly-resumable downloaded archive must be left in place"
+    );
+    assert!(
+        remaining.contains(&"gtfs_fp2026_20260812".to_string()),
+        "an unrelated version's staging directory must be left alone regardless of eligibility"
+    );
 }
 
 /// After a mixed success/failure run the manifest is internally consistent.

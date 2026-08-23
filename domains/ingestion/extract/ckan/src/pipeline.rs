@@ -426,15 +426,30 @@ pub async fn run(
     Ok(summary)
 }
 
-/// Staging is always disposable (design doc §12): wipe it unconditionally at
-/// the start of every run before touching the network, regardless of whether
-/// the previous run crashed or exited cleanly.
+/// Ensures `.staging/` exists and sweeps every `*.zip.part` file left behind
+/// under it — an interrupted download's partial bytes, never resumable in
+/// this design (no HTTP range support), so always safe to discard
+/// unconditionally regardless of which version it belongs to or whether that
+/// version is even still eligible this run.
+///
+/// Before Phase 6 this function wiped `.staging/` wholesale every run,
+/// unconditionally discarding anything an interrupted prior run had left
+/// behind. It no longer does: a completed `.zip`, a validated extraction, or
+/// a completed conversion are all left in place for `crate::snapshot`'s
+/// per-version resume logic (`find_resume_point`) to inspect and validate on
+/// its own when it actually processes that version — this function runs
+/// once at startup, before any version's resource metadata or control-plane
+/// record is even available yet, so it isn't in a position to make that
+/// per-version judgment itself.
 fn clean_staging(layout: &RawLayout) -> Result<(), PipelineError> {
     let staging = layout.staging_dir();
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)?;
-    }
     std::fs::create_dir_all(&staging)?;
+    for entry in std::fs::read_dir(&staging)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     Ok(())
 }
 

@@ -104,7 +104,12 @@ fn validate_members(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<(), 
 /// truncation introduced by the extraction/filesystem-write step itself, which
 /// the in-memory CRC check above can't see (design doc §6: "catches truncated
 /// members that a naive 'does the file exist' check would miss").
-fn verify_extracted_members(extract_dir: &Path) -> Result<(), ArchiveError> {
+///
+/// `pub(crate)` since Phase 6 (`crate::snapshot`'s stage-aware recovery) also
+/// uses this directly: it's the exact same check needed to decide whether a
+/// directory left behind by an interrupted prior run's extraction is safe to
+/// trust and resume from, rather than discarded and re-extracted.
+pub(crate) fn verify_extracted_members(extract_dir: &Path) -> Result<(), ArchiveError> {
     for required in REQUIRED_MEMBERS {
         let path = extract_dir.join(required);
         let metadata =

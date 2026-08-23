@@ -573,4 +573,108 @@ Download draws from one limit. Extract and Convert draw from a *second*, shared 
 
 ---
 
-**WAITING FOR APPROVAL** to begin Phase 6 (stage-aware crash recovery).
+**Phase 5 review resolved:**
+
+1. Approved: keep the bundled settings structure.
+2. Approved: keep the "no observable change" default for both new limits.
+
+Approved. Proceeded to Phase 6.
+
+---
+
+## Phase 6 — Stage-aware crash recovery
+
+### Implemented
+
+Before this phase, recovery from an interrupted run was all-or-nothing: at the start of every run, the pipeline deleted *everything* left over in its temporary working area, no matter how far a version had actually gotten, and reprocessed every retried version completely from the beginning — a fresh download, a fresh extraction, a fresh conversion — even if, say, the conversion had already fully finished and only the final "move it into place" step never happened. That's correct (nothing was ever lost or corrupted), but wasteful: a version that crashed one step before finishing paid the full cost of every step again.
+
+This phase makes recovery pick up from wherever a version actually got to, instead of always starting over. The rule for deciding that is simple and, deliberately, has nothing to do with what any previous run remembered — it works purely by looking at what's actually sitting on disk right now:
+
+```text
+For a given version, in order, ask:
+  1. Is there a complete, finished conversion sitting in temporary storage,
+     not yet moved to its final place? -> skip straight to publishing it.
+  2. Is there a complete, valid extraction sitting in temporary storage?
+     -> skip the download and extraction steps, resume at conversion.
+  3. Is there a complete downloaded archive sitting in temporary storage?
+     -> skip the download step, resume at verifying/extracting it.
+  4. None of the above -> start completely from scratch.
+```
+
+Each of these checks is a real, independent verification of the leftover file or directory — not a guess based on its name or an assumption that it must be fine because it exists. A leftover extraction is only trusted if it actually contains every required file, non-empty. A leftover conversion is only trusted if it has a matching output file for every input file. If a leftover artifact *fails* its check — e.g. a conversion that only got halfway through before the crash — it's discarded and that step runs fresh, exactly as before this phase.
+
+**Recovery matrix**, one row per place a crash could have happened:
+
+| Crash point | What's found on disk | Recovery |
+|---|---|---|
+| During download | only a not-yet-complete partial download | discarded — never resumable at all — download restarts |
+| Right after download finishes | a complete downloaded archive | re-checked (re-hashed from the file itself, not re-downloaded) — the network is never touched again for this file |
+| During extraction | an incomplete extraction | discarded; extraction restarts from the already-checked archive |
+| Right after extraction finishes | a complete, valid extraction | trusted as-is; download and extraction are both skipped entirely |
+| During conversion | an incomplete conversion | discarded; conversion restarts from the already-valid extraction |
+| Right after conversion finishes | a complete conversion, not yet moved into place | trusted as-is; download, extraction, *and* conversion are all skipped — jump straight to publishing |
+| Right after publishing, before its permanent record is written | the version's data is already in its final place but has no record yet | **not specially fast-pathed** — an existing, older safety rule (from before this project even started restructuring anything) already treats "data present but no record" as "not really installed yet," so it gets safely overwritten by a fresh run. Handled correctly, just not optimized — see Deviations below. |
+| Right after the permanent record is written, before internal bookkeeping catches up | fully installed, bookkeeping stale | **already handled by earlier phases, no new work needed** — proven already |
+| Before the "current version" pointer moves | fully installed, pointer not yet updated | **already handled by earlier phases** |
+| After the "current version" pointer moves | fully complete | **already handled** |
+
+Only the first six rows needed new logic this phase. The last four were already correct by construction from earlier phases (mostly Phase 2's reconciliation logic and pre-existing "recompute from scratch" bookkeeping) — this phase's job for those four was to confirm that and write it down, not to build anything new.
+
+**A real bug was caught by the tests, not just an interpretation question.** My first version of the "how far did this version get" check looked at extraction and conversion in the wrong order — it checked "is the extraction valid?" before checking "is the conversion already complete?" That's backwards for exactly the "right after conversion finishes" row above: in that scenario, the extraction's temporary files are *already cleaned up* (that cleanup is a normal, existing step, not something new), so checking extraction first wrongly concluded "no valid extraction, must not have gotten far" and thereby discarded a fully-finished conversion for no reason. One of the new tests caught this immediately; the fix was to check the most-progress possibility first and fall back from there.
+
+**One deliberate scope decision — not fast-pathed.** The "data written, permanent record not yet written" crash point (the row marked above) could, in principle, also skip straight to "just write the record" without redoing anything. I chose not to build that: the existing overwrite-on-conflict safety rule already handles it correctly (just not as efficiently — it'll redo work that was technically already done), and building the extra fast path would have meant recognizing a fifth kind of leftover state. Given how rare this exact crash window is (it's a narrow point between two steps that both happen almost immediately after each other), I judged the added complexity wasn't worth it yet, and flagged this as a review question rather than deciding it silently.
+
+**The "wipe everything at startup" step barely does anything now.** It used to delete the entire temporary working area unconditionally, every run. Now it only removes one specific, always-safe-to-delete kind of leftover (a download that never finished) and leaves everything else in place for the per-version check described above to inspect when that version is actually processed. This is a deliberate, plan-mandated change from the very first version of this system — flagged as a likely future change back in the initial reconnaissance report, now realized.
+
+### Files Changed
+
+- `domains/ingestion/extract/ckan/src/snapshot.rs` — the "how far did this get" check and the conditional stage execution it drives; the recovery matrix as a doc comment; 11 new fast, disk-only unit tests for the check itself.
+- `domains/ingestion/extract/ckan/src/download.rs` — a small addition: rebuild the same summary information (size, checksum) from a file that's already on disk, instead of only ever being able to produce it as a byproduct of downloading.
+- `domains/ingestion/extract/ckan/src/archive.rs` — the existing "does this extraction have everything it needs" check is now also directly reusable by the recovery logic, not just internally by the extraction step itself.
+- `domains/ingestion/extract/ckan/src/pipeline.rs` — the startup cleanup step narrowed from "delete everything" to "delete only never-resumable partial downloads."
+- `domains/ingestion/extract/ckan/tests/pipeline_concurrent.rs` — the one existing test that specifically checked the old "wipe everything" behavior was updated to check the new, narrower behavior instead (a direct, intentional consequence of this phase, not an incidental change).
+- `domains/ingestion/extract/ckan/tests/snapshot.rs` — 9 new integration tests, described below.
+
+### Tests Added / Updated
+
+20 new tests. A real crash can't be triggered inside a test, so each recovery test does the standard, already-established thing this project's tests do for exactly this problem: it directly constructs, on disk, the same leftover state a crash at that point would have produced, then runs the real pipeline function against it and checks what happens.
+
+| Test | Proves |
+|---|---|
+| `recovery_at_download_crash_point_restarts_download` | a partial download is discarded and downloading restarts, successfully |
+| `recovery_at_verify_crash_point_reverifies_without_redownloading` | a complete archive is re-checked without touching the network — proven by giving it a download address that can't possibly work, and it still succeeds |
+| `recovery_at_extract_crash_point_discards_and_reextracts` | an incomplete extraction is discarded and redone correctly |
+| `recovery_at_validate_crash_point_resumes_from_existing_extraction_without_reextracting` | a complete, valid extraction is trusted and reused *as-is* — proven by planting an extraction whose content deliberately differs from what re-extracting the archive would produce, and confirming the final output matches the planted content, not the archive's |
+| `recovery_at_convert_crash_point_discards_incomplete_conversion_and_reconverts` | an incomplete conversion is discarded and redone correctly, ending with every required output file present |
+| `recovery_after_conversion_crash_point_resumes_straight_to_publish` | a complete conversion is recognized and published directly, skipping every earlier step — proven the same way, plus by there being no extraction left to fall back to at all |
+| `already_published_data_is_never_touched_by_a_reprocessing_attempt` | attempting to reprocess an already-fully-published version is rejected before any file is touched, and the existing published data is provably byte-for-byte unchanged afterward |
+| `resumed_recovery_converges_to_the_same_final_state_as_an_uninterrupted_run` | a version recovered from a simulated crash and a version processed with no interruption at all end up with equivalent published data |
+| `resuming_does_not_leave_duplicate_or_stray_staging_artifacts` | after a resumed run finishes, there's exactly one final copy of the data and no leftover temporary files anywhere |
+| 11 fast, disk-only tests inside `snapshot.rs` itself | every branch of the "how far did this get" decision, checked directly and quickly, without needing a real network round trip for each one |
+
+### Validation
+
+- Formatting check: clean.
+- Compiler check (whole workspace, including test code): clean, no warnings.
+- Linter (whole workspace, including test code): the same 1 pre-existing, unrelated style suggestion from earlier phases, nothing new.
+- Full test run: **107 passed, 0 failed, 3 skipped** (the pre-existing wall-clock benchmarks, unaffected). Up from 87 in Phase 5 — 20 new tests, zero regressions. Re-ran the recovery-specific tests twice more to check for flakiness given they exercise real filesystem timing; all passed consistently both times.
+
+### Architectural Notes
+
+- **The startup cleanup behavior change is intentional and was predicted, not discovered.** The very first reconnaissance report (before any implementation began) explicitly flagged that this project's recovery model — "throw away everything and start over" — would need to change in exactly this phase, and that it would be "a real behavior change... not just an additive one." That's exactly what happened here, and the one test that depended on the old behavior was updated accordingly rather than left broken or silently bypassed.
+- **Re-verifying a resumed download reuses the exact same check a fresh extraction would already have to pass**, rather than needing its own separate validity check. If a leftover archive turns out to actually be corrupt despite looking complete, the normal extraction step rejects it exactly as it would reject a corrupted fresh download — no special-case handling needed, and the failure-and-retry behavior that already existed for that case still applies unchanged.
+- **Every "is this trustworthy" check is a real verification of content, not a shortcut based on a file's name or its mere presence.** An extraction is only trusted if every required file is actually there and non-empty; a conversion is only trusted if every required output file matches every required input file. This matters because a version's temporary files being present on disk doesn't, on its own, prove they represent *finished* work — only checking their actual contents does.
+
+### Deviations / Risks
+
+- The "data published, permanent record not yet written" crash point was deliberately left un-optimized (see above) — handled correctly by an existing, older safety rule, just not as efficiently as it could be. Flagged as a review question rather than assumed acceptable.
+- None of the other rows in the recovery matrix required a judgment call — either they needed the new logic and got it, or they were already correct and are now documented as such.
+
+### Review Questions
+
+1. The one deliberately un-optimized crash point (data published, record not yet written) — acceptable to leave as "correct but not fast-pathed" for now, or would you like it optimized in this phase after all?
+2. The recovery matrix table in the code's own documentation — is that level of detail (crash point / what's found / what happens) useful to keep maintaining directly alongside the code, or would you prefer it live only in this log?
+
+---
+
+**WAITING FOR APPROVAL** to begin Phase 7 (replace the global execution lock with per-version worker ownership).

@@ -269,3 +269,495 @@ async fn permits_are_not_leaked_across_real_pipeline_runs() {
         assert_eq!(permits.available_processing_permits(), 1);
     }
 }
+
+// ===========================================================================
+// Phase 6: stage-aware crash recovery — failure-injection tests.
+//
+// A real process crash can't be triggered from a test; each test instead
+// directly constructs the exact filesystem state a crash at that point would
+// have left (matching the pre-existing style in tests/pipeline_concurrent.rs),
+// then runs the real `process_snapshot` against it and checks recovery.
+//
+// Several tests give the version an unreachable download URL on purpose: if
+// `process_snapshot` still succeeds, that's direct proof the Download stage
+// was actually skipped — a network call to that address cannot succeed.
+// ===========================================================================
+
+fn unreachable_url() -> String {
+    // Port 0 is never a real destination; connecting to it fails immediately.
+    "http://127.0.0.1:0/fixture.zip".to_string()
+}
+
+fn read_parquet_column(path: &std::path::Path, column: &str) -> Vec<String> {
+    use arrow_array::{Array, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let file = std::fs::File::open(path).unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut values = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let idx = batch.schema().index_of(column).unwrap();
+        let col = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..col.len() {
+            values.push(col.value(i).to_string());
+        }
+    }
+    values
+}
+
+fn write_extraction(dir: &std::path::Path, col_b_value: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    for name in REQUIRED_GTFS {
+        std::fs::write(dir.join(name), format!("col_a,col_b\n1,{col_b_value}\n")).unwrap();
+    }
+}
+
+fn write_conversion(
+    extract_dir: &std::path::Path,
+    parquet_dir: &std::path::Path,
+    col_b_value: &str,
+) {
+    write_extraction(extract_dir, col_b_value);
+    std::fs::create_dir_all(parquet_dir).unwrap();
+    ckan::parquet_convert::convert_directory(extract_dir, parquet_dir).unwrap();
+}
+
+/// Crash point: Download. Only a `.zip.part` is left — never resumable — so
+/// this must restart Download from scratch and still succeed via the real
+/// server.
+#[tokio::test]
+async fn recovery_at_download_crash_point_restarts_download() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let url = serve_one_response(build_valid_zip_bytes()).await;
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(
+        layout.staging_part_path(dir_name),
+        b"an interrupted, unusable partial download",
+    )
+    .unwrap();
+
+    let resource = resource("20260805", url.clone());
+    let work = queued_work("20260805", &url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(
+        outcome.meta.is_ok(),
+        "must recover by restarting the download"
+    );
+    assert_eq!(outcome.work.state, WorkState::Published);
+    assert!(!layout.staging_part_path(dir_name).exists());
+}
+
+/// Crash point: right after Download, before/during Verify. A complete
+/// `.zip` exists; recovery must re-verify it from disk and skip re-fetching
+/// it — proven here by giving the version an unreachable URL.
+#[tokio::test]
+async fn recovery_at_verify_crash_point_reverifies_without_redownloading() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(layout.staging_zip_path(dir_name), build_valid_zip_bytes()).unwrap();
+
+    let resource = resource("20260805", unreachable_url());
+    let work = queued_work("20260805", &resource.download_url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(
+        outcome.meta.is_ok(),
+        "an unreachable URL must not matter — the archive was already downloaded: {:?}",
+        outcome.meta.err()
+    );
+    assert_eq!(outcome.work.state, WorkState::Published);
+}
+
+/// Crash point: Extract. An incomplete extraction is left behind; recovery
+/// must discard it and re-extract from the (already-verified) zip.
+#[tokio::test]
+async fn recovery_at_extract_crash_point_discards_and_reextracts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(layout.staging_zip_path(dir_name), build_valid_zip_bytes()).unwrap();
+    let extract_dir = layout.staging_extract_dir(dir_name);
+    std::fs::create_dir_all(&extract_dir).unwrap();
+    std::fs::write(extract_dir.join("stops.txt"), b"col_a,col_b\n1,2\n").unwrap();
+    // The other 4 required members are missing: an incomplete extraction.
+
+    let resource = resource("20260805", unreachable_url());
+    let work = queued_work("20260805", &resource.download_url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(
+        outcome.meta.is_ok(),
+        "must recover by re-extracting: {:?}",
+        outcome.meta.err()
+    );
+    let final_dir = layout.final_dir(dir_name);
+    for name in REQUIRED_GTFS {
+        let stem = name.trim_end_matches(".txt");
+        assert!(
+            final_dir.join(format!("{stem}.parquet")).exists(),
+            "{stem}.parquet must exist after a full re-extraction"
+        );
+    }
+}
+
+/// Crash point: right after Extract, before/during Validate. A complete,
+/// valid extraction exists; recovery must trust it as-is (skip Download and
+/// Extract entirely) rather than re-extracting from the zip — proven by
+/// planting an extraction whose *content* differs from what the zip would
+/// actually produce, and confirming the published output reflects the
+/// planted content, not the zip's.
+#[tokio::test]
+async fn recovery_at_validate_crash_point_resumes_from_existing_extraction_without_reextracting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let dir_name = "gtfs_fp2026_20260805";
+    // The zip, if actually re-extracted, would produce col_b = "from-zip".
+    let mut zip_buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for name in REQUIRED_GTFS {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(b"col_a,col_b\n1,from-zip\n").unwrap();
+        }
+        w.finish().unwrap();
+    }
+    std::fs::write(layout.staging_zip_path(dir_name), zip_buf).unwrap();
+    // The planted extraction has different, distinguishable content.
+    write_extraction(
+        &layout.staging_extract_dir(dir_name),
+        "from-resumed-extraction",
+    );
+
+    let resource = resource("20260805", unreachable_url());
+    let work = queued_work("20260805", &resource.download_url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(outcome.meta.is_ok(), "{:?}", outcome.meta.err());
+    let final_dir = layout.final_dir(dir_name);
+    let values = read_parquet_column(&final_dir.join("stops.parquet"), "col_b");
+    assert_eq!(
+        values,
+        vec!["from-resumed-extraction".to_string()],
+        "the planted extraction must be reused as-is, not re-extracted from the zip"
+    );
+}
+
+/// Crash point: Convert. An incomplete conversion is left behind; recovery
+/// must discard it and reconvert from the (already-valid) extraction.
+#[tokio::test]
+async fn recovery_at_convert_crash_point_discards_incomplete_conversion_and_reconverts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(layout.staging_zip_path(dir_name), build_valid_zip_bytes()).unwrap();
+    write_extraction(&layout.staging_extract_dir(dir_name), "extracted-value");
+    let parquet_dir = layout.staging_parquet_dir(dir_name);
+    std::fs::create_dir_all(&parquet_dir).unwrap();
+    std::fs::write(
+        parquet_dir.join("stops.parquet"),
+        b"not a real parquet file",
+    )
+    .unwrap();
+    // The other 4 required members were never converted: incomplete.
+
+    let resource = resource("20260805", unreachable_url());
+    let work = queued_work("20260805", &resource.download_url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(
+        outcome.meta.is_ok(),
+        "must recover by reconverting: {:?}",
+        outcome.meta.err()
+    );
+    let final_dir = layout.final_dir(dir_name);
+    let values = read_parquet_column(&final_dir.join("stops.parquet"), "col_b");
+    assert_eq!(
+        values,
+        vec!["extracted-value".to_string()],
+        "stops.parquet must be the freshly (and correctly) reconverted file, not the garbage placeholder"
+    );
+    for name in REQUIRED_GTFS {
+        let stem = name.trim_end_matches(".txt");
+        assert!(final_dir.join(format!("{stem}.parquet")).exists());
+    }
+}
+
+/// Crash point: after Convert, before Publish. A fully complete conversion
+/// exists and `extract_staging` has already been cleaned up — exactly what
+/// `run_stages`'s own successful-conversion cleanup leaves behind. Recovery
+/// must skip straight to Publish: proven by an unreachable URL (Download
+/// skipped) and by there being no `extract_staging` to re-extract from.
+#[tokio::test]
+async fn recovery_after_conversion_crash_point_resumes_straight_to_publish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(layout.staging_zip_path(dir_name), build_valid_zip_bytes()).unwrap();
+    let extract_dir = layout.staging_extract_dir(dir_name);
+    let parquet_dir = layout.staging_parquet_dir(dir_name);
+    write_conversion(&extract_dir, &parquet_dir, "converted-before-crash");
+    std::fs::remove_dir_all(&extract_dir).unwrap(); // matches run_stages's own post-conversion cleanup
+
+    let resource = resource("20260805", unreachable_url());
+    let work = queued_work("20260805", &resource.download_url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(outcome.meta.is_ok(), "{:?}", outcome.meta.err());
+    assert_eq!(outcome.work.state, WorkState::Published);
+    let final_dir = layout.final_dir(dir_name);
+    let values = read_parquet_column(&final_dir.join("stops.parquet"), "col_b");
+    assert_eq!(values, vec!["converted-before-crash".to_string()]);
+    assert!(
+        !layout.staging_parquet_dir(dir_name).exists(),
+        "staging must be gone — moved into place by Publish, not copied"
+    );
+}
+
+/// Already-published data is never corrupted: attempting to reprocess a
+/// version whose control-plane record is already PUBLISHED is rejected at
+/// Claim, before any filesystem work happens — the existing published
+/// snapshot must be completely untouched.
+#[tokio::test]
+async fn already_published_data_is_never_touched_by_a_reprocessing_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let url = serve_one_response(build_valid_zip_bytes()).await;
+    let good_resource = resource("20260805", url.clone());
+    let work = queued_work("20260805", &url);
+    let permits = ResourcePermits::new(4, 4);
+    let first = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &good_resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+    assert_eq!(first.work.state, WorkState::Published);
+
+    let final_dir = layout.final_dir("gtfs_fp2026_20260805");
+    let before = read_parquet_column(&final_dir.join("stops.parquet"), "col_b");
+
+    // A caller bug tries to reprocess it, pointed at a resource that would
+    // produce different content if it actually ran.
+    let poisoned_resource = resource("20260805", unreachable_url());
+    let second = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &poisoned_resource,
+        &permits,
+        first.work,
+        None,
+    )
+    .await;
+
+    assert!(
+        second.meta.is_err(),
+        "a PUBLISHED record must reject reprocessing"
+    );
+    assert_eq!(
+        second.work.state,
+        WorkState::Published,
+        "state must be unchanged"
+    );
+    let after = read_parquet_column(&final_dir.join("stops.parquet"), "col_b");
+    assert_eq!(
+        before, after,
+        "the already-published snapshot must be byte-for-byte untouched"
+    );
+}
+
+/// Recovery converges to the same final state as an uninterrupted run: a
+/// fresh, uninterrupted pipeline and one resumed from an "after conversion"
+/// crash point both end up PUBLISHED with equivalent data.
+#[tokio::test]
+async fn resumed_recovery_converges_to_the_same_final_state_as_an_uninterrupted_run() {
+    let permits = ResourcePermits::new(4, 4);
+
+    // -- uninterrupted run --------------------------------------------------
+    let tmp_fresh = tempfile::tempdir().unwrap();
+    let layout_fresh = RawLayout::new(tmp_fresh.path().to_path_buf());
+    std::fs::create_dir_all(layout_fresh.staging_dir()).unwrap();
+    let url = serve_one_response(build_valid_zip_bytes()).await;
+    let fresh_outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout_fresh,
+        &resource("20260805", url.clone()),
+        &permits,
+        queued_work("20260805", &url),
+        None,
+    )
+    .await;
+
+    // -- resumed run, crashed "after conversion" -----------------------------
+    let tmp_resumed = tempfile::tempdir().unwrap();
+    let layout_resumed = RawLayout::new(tmp_resumed.path().to_path_buf());
+    std::fs::create_dir_all(layout_resumed.staging_dir()).unwrap();
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(
+        layout_resumed.staging_zip_path(dir_name),
+        build_valid_zip_bytes(),
+    )
+    .unwrap();
+    let extract_dir = layout_resumed.staging_extract_dir(dir_name);
+    let parquet_dir = layout_resumed.staging_parquet_dir(dir_name);
+    write_conversion(&extract_dir, &parquet_dir, "2"); // matches build_valid_zip_bytes's "1,2"
+    std::fs::remove_dir_all(&extract_dir).unwrap();
+    let resumed_outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout_resumed,
+        &resource("20260805", unreachable_url()),
+        &permits,
+        queued_work("20260805", &unreachable_url()),
+        None,
+    )
+    .await;
+
+    let fresh_meta = fresh_outcome.meta.expect("uninterrupted run must succeed");
+    let resumed_meta = resumed_outcome.meta.expect("resumed run must succeed");
+
+    assert_eq!(fresh_outcome.work.state, WorkState::Published);
+    assert_eq!(resumed_outcome.work.state, WorkState::Published);
+    assert_eq!(
+        fresh_meta.archive_sha256, resumed_meta.archive_sha256,
+        "both runs downloaded/re-verified the identical archive"
+    );
+
+    let fresh_values = read_parquet_column(
+        &layout_fresh.final_dir(dir_name).join("stops.parquet"),
+        "col_b",
+    );
+    let resumed_values = read_parquet_column(
+        &layout_resumed.final_dir(dir_name).join("stops.parquet"),
+        "col_b",
+    );
+    assert_eq!(
+        fresh_values, resumed_values,
+        "the published data must be equivalent regardless of how it got there"
+    );
+}
+
+/// No duplicate snapshots: after a resumed run publishes successfully, there
+/// is exactly one final directory and no leftover staging artifacts for that
+/// version.
+#[tokio::test]
+async fn resuming_does_not_leave_duplicate_or_stray_staging_artifacts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = RawLayout::new(tmp.path().to_path_buf());
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+
+    let dir_name = "gtfs_fp2026_20260805";
+    std::fs::write(layout.staging_zip_path(dir_name), build_valid_zip_bytes()).unwrap();
+    write_extraction(&layout.staging_extract_dir(dir_name), "2");
+
+    let resource = resource("20260805", unreachable_url());
+    let work = queued_work("20260805", &resource.download_url);
+    let permits = ResourcePermits::new(4, 4);
+    let outcome = process_snapshot(
+        &reqwest::Client::new(),
+        &layout,
+        &resource,
+        &permits,
+        work,
+        None,
+    )
+    .await;
+
+    assert!(outcome.meta.is_ok(), "{:?}", outcome.meta.err());
+
+    let final_entries: Vec<_> = std::fs::read_dir(layout.root())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy() == dir_name)
+        .collect();
+    assert_eq!(
+        final_entries.len(),
+        1,
+        "exactly one final directory for this version"
+    );
+
+    assert!(!layout.staging_zip_path(dir_name).exists());
+    assert!(!layout.staging_extract_dir(dir_name).exists());
+    assert!(!layout.staging_parquet_dir(dir_name).exists());
+}
