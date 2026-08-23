@@ -1,0 +1,211 @@
+# IMPL-001: GTFS Static Downloader V2 — Implementation Log
+
+This document tracks the phase-by-phase implementation of the GTFS Static Downloader v2 plan. Each section is the review-checkpoint report produced at the end of that phase. The existing system is documented in [DD-001-gtfs-static-downloader.md](../design/DD-001-gtfs-static-downloader.md); this log records what changed on top of it and why.
+
+---
+
+## Phase 0 — Repository and current-state reconnaissance
+
+**Status: Complete. No code changed.** This phase was read-only reconnaissance of the `ckan` crate at `domains/ingestion/extract/ckan/`, cross-checked against [DD-001-gtfs-static-downloader.md](../design/DD-001-gtfs-static-downloader.md) and [ADR 0011](../architecture/adr/0011-gtfs-static-preprocessing-and-zurich-subset-strategy.md).
+
+### Current architecture
+
+Single binary (`ckan::main`), one process per invocation, no persistent daemon. `pipeline::run()` is the entire lifecycle:
+
+```
+main() → CkanConfig::from_env() → pipeline::run()
+  1. acquire UpdaterLock (.updater.lock)
+  2. clean_staging()                         — wipe .staging/ unconditionally
+  3. manifest::scan_sidecars()                — filesystem is ground truth for "installed"
+  4. rebuild + write manifest, verify_latest_consistency()  — fail loudly on mismatch
+  5. ckan_client.list_gtfs_zip_resources()    — Discover
+  6. filter by cutoff, filter by already-installed → Reconcile
+  7. for each pending version (bounded by Arc<Semaphore>):
+       spawn Tokio task → process_version()   — Download→Verify→Extract→Validate→Convert→Publish
+  8. join all tasks (JoinSet::join_next)
+  9. advance_latest_if_needed()               — max verified version, never backwards
+  10. rebuild + write final manifest
+  11. lock released on Drop
+```
+
+Mapped onto the 9 conceptual stages used to plan this work:
+
+| Stage | File | Notes |
+|---|---|---|
+| 1. Discover | `ckan_client.rs::list_gtfs_zip_resources` | CKAN `package_show`, retried 3× via `ti_common::retry`, parses filenames via `domain::parse_resource_filename` |
+| 2. Reconcile | `pipeline.rs::run` (cutoff filter + `installed.contains_key`) | Pure in-memory filter each run; no persisted "pending" state between runs |
+| 3. Download | `download.rs::download_to_staging` | Async streaming to `.zip.part`, atomic rename to `.zip` on completion |
+| 4. Verify | `download.rs` (Content-Length check) + `domain.rs::verify_upstream_hash` (SHA-256) | Verify happens *before* extraction, one stage, split across two files |
+| 5. Extract | `archive.rs::validate_and_extract` | Extraction and validation are one function, not separable stages currently |
+| 6. Validate | `archive.rs` (`validate_members` pre-extract CRC pass + `verify_extracted_members` post-extract) | Archive-level only, no GTFS semantic checks (explicit non-goal) |
+| 7. Convert | `parquet_convert.rs::convert_directory` | Whole-file-in-memory, Utf8-only columns, ZSTD compression |
+| 8. Publish | `pipeline.rs::process_version` (rename) + `manifest::write_sidecar` | Atomic `rename()`, staging→final, sidecar written immediately after |
+| 9. Manifest/latest | `manifest.rs` + `symlink.rs` + `pipeline.rs::advance_latest_if_needed` | Manifest rebuilt from sidecars every run; symlink swap via temp-symlink+rename |
+
+### Current state machine
+
+There isn't a persisted per-version state machine today. State is **derived, not stored**:
+
+- A version is "installed" iff `raw/<version>/` exists **and** has a valid `.snapshot-meta.json` (`manifest.rs::scan_sidecars`). No sidecar → not installed, regardless of directory contents.
+- There is no `DISCOVERED`/`QUEUED`/`RUNNING` durable record. A version is implicitly "pending" for exactly one run: computed each invocation as `eligible - installed`.
+- Failure is not durable either: `failed_this_run` is an in-memory `BTreeMap` that only survives long enough to render the end-of-run manifest snapshot. A version that failed on a previous run has zero record of that fact on the next run — it's simply attempted again because it's still not installed.
+- `SidecarStatus` enum has `Verified` and `Failed`, but `Failed` is documented as never actually serialized (`manifest.rs:26-29`) — a failed version never gets a final directory or sidecar.
+- `ManifestStatus` adds `Superseded`, computed at manifest-rebuild time (not persisted per-version) by comparing to `latest`.
+
+So today's "state machine" is really: **filesystem presence-or-absence, recomputed from scratch every run.**
+
+### Current concurrency model
+
+- Single `Arc<Semaphore>` bounding total in-flight versions (`GTFS_S_MAX_CONCURRENT_VERSIONS`, default `min(4, available_parallelism)`).
+- One Tokio task per version, spawned into a `JoinSet`; the permit is held for the entire per-version pipeline (download+extract+convert), released only when the task finishes.
+- `tokio::task::spawn_blocking` wraps archive extraction and Parquet conversion (CPU/disk-bound sync work) so they don't block the async executor.
+- No resource-specific pools: download concurrency and extract/convert concurrency share the same semaphore/slot. A version that's converting occupies the same "slot type" as a version that's downloading.
+- All shared mutable state (manifest, `latest`, `installed` map) is touched only *after* `JoinSet::join_next()` drains — i.e., serialized in the main task, never from worker tasks.
+- Producer isn't decoupled from execution: `pipeline::run` spawns a task per pending version directly (bounded by permit acquisition blocking the spawn loop) — there's no separate queue data structure, just semaphore-gated spawning.
+
+### Current locking model
+
+- Single global `.updater.lock` file (`lock.rs`), exclusive-create semantics, holding PID + hostname + timestamp.
+- One retry on contention: if the existing lock's PID isn't alive on the same host, it's deleted and acquisition retried once.
+- Cross-host contention (different hostname) is always treated as held — no way to verify liveness remotely.
+- Released via `Drop` (RAII), covering both success and panic-unwind paths.
+- This lock only serializes whole **invocations**, not individual versions — it does not implement per-version ownership/leasing.
+
+### Current recovery model
+
+- Fully stateless/idempotent-by-recomputation: `clean_staging()` deletes `.staging/` unconditionally at the start of every run, regardless of whether the prior run crashed or exited cleanly. Nothing is resumed — a partially downloaded/extracted/converted version is discarded and reprocessed wholesale.
+- Stale lock recovery: PID-liveness check via `/proc/<pid>` (Linux-only, acceptable per code comment).
+- Missing/corrupt manifest: fully rebuilt from sidecars every run (never trusted as authoritative even when present).
+- `latest`/manifest mismatch: **fails loudly** (`PipelineError::LatestMismatch`) rather than guessing — this is a deliberate invariant, not a bug.
+- A snapshot directory without a valid sidecar is never treated as installed, so it will be silently overwritten by a freshly-validated copy on next successful processing (`pipeline.rs:420-434`, logged as a warning).
+- There is no crash-recovery granularity finer than "redo the whole version." No stage-boundary state is persisted (Phase 6 in the plan targets exactly this gap).
+
+### Existing test coverage
+
+All 34 non-ignored tests pass; 3 wall-clock benchmarks are `#[ignore]`d by design.
+
+| File | Count | Covers |
+|---|---|---|
+| `src/domain.rs` (unit) | 4 | filename parsing (current + legacy hyphenated), version ordering |
+| `src/config.rs` (unit) | 6 | env parsing, cutoff parsing, concurrency default/override, raw_dir resolution |
+| `src/pipeline.rs` (unit) | 2 | `format_bytes`/`format_duration` helpers only — no unit tests of `run`/`process_version` logic itself |
+| `tests/archive.rs` | 4 | Tier-1 validation: valid zip, missing member, empty member, non-zip |
+| `tests/parquet_convert.rs` | 2 | CSV→Parquet conversion, string round-trip, row-count preservation |
+| `tests/symlink.rs` | 2 | atomic advance, no leftover temp symlink |
+| `tests/lock.rs` | 3 | acquire/release round trip, stale-lock self-heal, live-PID contention |
+| `tests/manifest_recovery.rs` | 3 | manifest rebuild after deletion, latest = highest version not upload order, dir-without-sidecar not installed |
+| `tests/pipeline_concurrent.rs` | 8 | full pipeline via a **synchronous re-implementation** (`run_version_pipeline_sync`) of `process_version`'s steps — not calling `pipeline::process_version` or `pipeline::run` directly; covers success, failure isolation, latest-by-version-id-not-completion-order, staging cleanup on failure, startup staging wipe |
+| `tests/benchmark_concurrent.rs` | 3 (ignored) | sequential vs. concurrent wall-clock comparison |
+
+**Coverage gap worth flagging for later phases**: nothing exercises `pipeline::run` or `pipeline::process_version` end-to-end through Tokio (no mock HTTP layer for CKAN or download); `pipeline_concurrent.rs` duplicates the pipeline logic synchronously rather than calling the real async functions, so a bug introduced only in `process_version`'s orchestration (not in the underlying `archive`/`parquet_convert`/`manifest` calls it makes) wouldn't necessarily be caught by today's suite.
+
+### Validation run
+
+- `cargo fmt --check` (workspace): **1 diff** — pre-existing, in `ckan/tests/benchmark_concurrent.rs:36` (a `write_all` call split across lines that `rustfmt` would now collapse). Not introduced this phase; not fixed, per Phase 0's "do not change architecture" instruction.
+- `cargo check --workspace --all-targets`: clean, no warnings.
+- `cargo clippy --workspace --all-targets`: **2 pre-existing warnings**, both in test files, both style-only (`doc_nested_refdefs` in a doc-comment link in `pipeline_concurrent.rs`, `unnecessary_map_or` in the same file). No warnings in library/binary code.
+- `cargo test -p ckan`: **34 passed, 0 failed, 3 ignored** (benchmarks).
+
+### Identified architectural seams
+
+These are the places the plan's later phases will need to cut into — flagged here, not acted on:
+
+1. **No durable work record.** "Pending" is `eligible - installed`, recomputed every run from CKAN + filesystem. Phase 1's `DISCOVERED→QUEUED→RUNNING→PUBLISHED` state needs a new persisted structure; nothing today tracks `attempt`, `worker_id`, `started_at`, or `last_error` for a version.
+2. **Failure has no memory across runs.** `failed_this_run` dies with the process. Phase 1/2's "retryable failures eligible for retry" reconciliation rule has no failure history to consult yet — today a failed version is retried unconditionally next run, which is a strictly weaker (but not wrong) version of the target behavior.
+3. **Producer and executor are fused.** `pipeline::run`'s `for resource in pending` loop both decides what to run and spawns it, gated only by permit acquisition. Phase 3's bounded-queue-with-backpressure will need to split "what should run" from "spawn it now," since currently there's no queue object to inspect depth on or drain independently of spawning.
+4. **Extract and Validate are one function.** `archive::validate_and_extract` interleaves the pre-extract CRC pass, the extraction call, and the post-extract re-check in a single function. Phase 4's explicit stage boundaries (Extract vs. Validate as distinct steps with distinct durable-state-before/after) will need to decide whether to split this or treat it as one atomic stage.
+5. **Single concurrency dimension.** One semaphore covers download + extract + convert as one undifferentiated resource. Phase 5's network vs. CPU/disk permit split requires threading two separate `Semaphore`s through `process_version` where today there's one, held for the task's full lifetime.
+6. **Recovery granularity is "redo everything."** `clean_staging()` nukes `.staging/` wholesale on every start. Phase 6's stage-aware recovery matrix (e.g., "after conversion → publish existing completed staging" instead of restarting) is a real behavior change from today's blanket wipe, not just an additive one — worth flagging explicitly since it changes what currently happens on a warm restart.
+7. **Lock only serializes invocations, not versions.** Phase 7's per-version lease/ownership model is additive on top of `UpdaterLock`, not a replacement — the plan's phase text confirms this, but worth confirming the global lock's purpose (one invocation at a time) doesn't disappear when leases arrive; it's a different axis (invocation-level vs. version-level exclusivity).
+8. **`RunSummary` is the only observability surface today** — a `println!`+`tracing::info!` block at the very end of a run. Phase 8's per-stage-duration, per-attempt-traceable logging has no scaffolding yet (no `stage` field anywhere in current `tracing` calls, no `worker_id` concept at all).
+
+No decisions were made about *how* to close these seams — that's Phase 1+ territory.
+
+---
+
+Approved. Proceeded to Phase 1.
+
+---
+
+## Phase 1 — Durable per-version work model
+
+### Implemented
+
+A new control-plane state model, entirely additive — nothing in the existing discover/download/publish pipeline (`pipeline.rs`) was touched or wired to it yet. That wiring is Phase 2's job (the reconciliation scheduler that decides what work is eligible by consulting this state alongside the filesystem).
+
+- **`ckan::work_state`** (new module): the `WorkState` enum (`Discovered`, `Queued`, `Running`, `Published`, `Failed`) and the `VersionWork` record (`version`, `source_url`, `state`, `attempt`, `worker_id`, `started_at`, `completed_at`, `last_error` — exactly the field list the plan specified).
+- A pure `is_valid_transition(from, to) -> bool` function encodes the state graph:
+
+  ```text
+  DISCOVERED -> QUEUED
+  QUEUED     -> RUNNING
+  RUNNING    -> PUBLISHED
+  RUNNING    -> FAILED
+  RUNNING    -> QUEUED     (stale-running recovery)
+  FAILED     -> QUEUED     (retry)
+  PUBLISHED  -> PUBLISHED  (idempotent no-op)
+  ```
+
+  Every other `(from, to)` pair is rejected with `InvalidTransition { from, to }`.
+- Higher-level methods (`queue`, `start`, `publish`, `fail`, `retry`, `recover_stale_running`) wrap that graph and additionally maintain the metadata fields: `start` increments `attempt` and clears `last_error`/`completed_at` from any prior attempt; `publish`/`fail` release `worker_id` and stamp `completed_at`; `recover_stale_running` clears `worker_id`/`started_at` but deliberately leaves `last_error` alone, since an interrupted attempt isn't a diagnosed failure.
+- `publish()` on an already-`Published` record is a true no-op (returns `Ok(())` without mutating any field) — required for the "version processing is idempotent" invariant to survive a crash between the filesystem's atomic rename and this control-plane update.
+- Persistence follows the repository's existing sidecar convention rather than a database: one pretty-printed JSON file per version at `.work/<version>.json`, sibling to the existing `.manifest.json`/`.updater.lock`. Added `RawLayout::work_dir()` / `work_state_path()` in `paths.rs` alongside the other path helpers. `write_work_state`, `scan_work_states` (tolerant of corrupt/non-JSON entries, same pattern as `manifest::scan_sidecars`) round out the module.
+- `recover_stale_running(&mut BTreeMap<VersionId, VersionWork>) -> Vec<VersionId>` is a pure, in-memory batch operation: it recovers every `Running` record and leaves everything else untouched. It does not persist anything itself — Phase 2's scheduler will call it during startup reconciliation and then decide when/how to write the result back, alongside the CKAN-discovery merge.
+
+### Files Changed
+
+- `domains/ingestion/extract/ckan/src/work_state.rs` (new) — state machine, persistence, 11 inline unit tests.
+- `domains/ingestion/extract/ckan/tests/work_state.rs` (new) — 4 persistence/recovery integration tests.
+- `domains/ingestion/extract/ckan/src/paths.rs` — added `work_dir()` and `work_state_path()`.
+- `domains/ingestion/extract/ckan/src/lib.rs` — registered `pub mod work_state;`.
+- `domains/ingestion/extract/ckan/tests/benchmark_concurrent.rs` — whitespace-only reformat from running `cargo fmt`; this was the one pre-existing `cargo fmt --check` diff flagged in Phase 0, now resolved as a side effect of formatting the new files. No behavior change.
+
+### Tests Added / Updated
+
+All new; nothing existing was modified.
+
+| Test | Proves |
+|---|---|
+| `happy_path_discovered_to_published` | valid state transitions, attempt/worker_id/timestamp bookkeeping along the way |
+| `skipping_queued_is_rejected` | a specific invalid transition (Discovered → Running) is rejected and reports the right `from`/`to` |
+| `every_illegal_transition_is_rejected` | exhaustive 5×5 matrix over all states — every pair not in the valid-transition list is rejected, and rejection never mutates `state` |
+| `published_cannot_be_restarted` | Published is terminal against Running/Queued/Failed |
+| `republishing_an_already_published_record_is_a_noop` | idempotent transition to PUBLISHED — the whole record is byte-for-byte unchanged on a second `publish()` call |
+| `a_failed_version_can_be_retried_and_reattempted` | retryable failure — Failed → Queued → Running again, `attempt` goes 1→2, `last_error` clears only once the next attempt actually starts |
+| `a_failed_version_stays_failed_until_explicitly_retried` | terminal failure — Failed is a stable resting state; nothing transitions out of it except the explicit retry path |
+| `stale_running_recovers_to_queued_without_counting_as_a_failure` | recovery of stale RUNNING — requeues, clears ownership/start time, does **not** touch `attempt` or `last_error` |
+| `recover_stale_running_batch_only_touches_running_records` | the batch recovery helper only touches `Running` records among a mixed set of all five states |
+| `write_then_scan_round_trips_every_field` | JSON persistence round-trip is lossless |
+| `scan_ignores_corrupt_and_non_json_entries` | corrupt/unrelated files in `.work/` don't break a scan (mirrors `manifest::scan_sidecars`'s tolerance) |
+| `scan_on_missing_work_dir_returns_empty` | no `.work/` directory yet is a valid empty-state, not an error |
+| `stale_running_record_recovers_across_a_restart` | end-to-end: write a crashed Running record + an unrelated Published record to disk, "restart" (scan → recover → persist), reread from disk, confirm only the stale record changed and durably so |
+
+### Validation
+
+- **cargo fmt**: clean (`cargo fmt --check` passes workspace-wide). Running `cargo fmt -p ckan` while formatting the two new files also collapsed the one pre-existing drift in `benchmark_concurrent.rs` flagged in Phase 0 — a formatting-only change, included in the diff above for transparency.
+- **cargo check** (`--workspace --all-targets`): clean, no warnings.
+- **cargo clippy** (`--workspace --all-targets`): same 2 pre-existing warnings as Phase 0 (both in `pipeline_concurrent.rs`, both style-only), nothing new from `work_state.rs` or its tests.
+- **cargo test -p ckan**: **47 passed, 0 failed, 3 ignored** (the pre-existing wall-clock benchmarks). Up from 34 passed in Phase 0 — 13 new tests (9 unit + 4 integration), zero regressions.
+
+### Architectural Notes
+
+- **Control plane vs. data plane, made physically explicit.** `.work/*.json` (control plane: what work should happen) now lives as a sibling directory to the existing `.snapshot-meta.json` sidecars and `.manifest.json` (data plane: what's actually published) under the same `raw_dir` root, rather than a new subsystem — consistent with "follow the repository's existing storage conventions, don't introduce a database."
+- **`worker_id` is `Option<String>` and unused for real ownership yet.** As instructed, this phase does not implement leases; `start()` accepts whatever caller-supplied identity is given (or `None`) and stores it purely as a record. Phase 7 is where this becomes a real ownership mechanism with heartbeats and expiry.
+- **No retry policy or backoff is encoded here.** `retry()` only asserts the transition is legal; *when* a Failed record should be retried (immediately, after backoff, capped at N attempts) is deliberately left to Phase 2's reconciliation rules, per "do not add abstractions without an immediate use."
+- **Recovery is unconditional, not lease-based.** `recover_stale_running` treats every persisted `Running` record as stale, full stop — correct today because `UpdaterLock` guarantees at most one invocation runs at a time, so a `Running` record can only be found at startup if the process that wrote it is gone. This reasoning stops holding once Phase 9/10 allow multiple concurrent workers; at that point stale-detection needs a real lease timeout instead of "found at startup." Flagging this now so it isn't mistaken for an oversight later.
+- **Nothing in `pipeline.rs` changed.** The existing discover → download → verify → extract → validate → convert → publish flow, its semaphore-bounded concurrency, its manifest/latest bookkeeping, and its all-or-nothing per-run failure tracking are all completely unchanged and still fully covered by the Phase 0 test suite (all 34 original tests still pass, unmodified). This phase only adds a state model; it does not yet observe or drive real processing.
+
+### Deviations / Risks
+
+- None from the plan's Phase 1 scope. One incidental fix: the pre-existing `cargo fmt` drift in `benchmark_concurrent.rs` (flagged, not fixed, in Phase 0) got swept up by running `cargo fmt -p ckan` on the new files. Called out explicitly in case a whitespace-only diff in an unrelated file is unexpected in this phase's changeset.
+- Risk to watch in Phase 2: because `VersionWork` doesn't yet know about `UpstreamResource`'s `name_prefix` (needed to compute `snapshot_dir_name()` for filesystem reconciliation), the reconciler will need either to carry that alongside the control-plane record or recompute it from `source_url`. Not a Phase 1 problem, but worth deciding deliberately rather than bolting on.
+
+### Review Questions
+
+1. Does the `.work/<version>.json` location and naming match what you'd expect for the control-plane store, or would you prefer it nested differently relative to `.manifest.json`/`.updater.lock`?
+2. `recover_stale_running` currently has no caller — it's proven correct in isolation but not yet exercised against the real pipeline. Confirm this should wait for Phase 2 rather than being wired into `pipeline::run`'s existing startup sequence now.
+3. Any objection to the `worker_id: Option<String>` being freeform (caller-supplied string, no format enforced) at this stage, given Phase 7 will define its real semantics?
+
+---
+
+**WAITING FOR APPROVAL** to begin Phase 2 (reconciliation scheduler).

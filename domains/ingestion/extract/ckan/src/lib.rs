@@ -15,3 +15,4 @@ pub mod parquet_convert;
 pub mod paths;
 pub mod pipeline;
 pub mod symlink;
+pub mod work_state;

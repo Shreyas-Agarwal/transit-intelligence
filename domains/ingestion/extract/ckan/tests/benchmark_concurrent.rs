@@ -36,10 +36,8 @@ fn build_synthetic_zip(path: &std::path::Path, rows_per_file: usize) {
         w.write_all(b"id,value_a,value_b,value_c,value_d,value_e\n")
             .unwrap();
         for i in 0..rows_per_file {
-            w.write_all(
-                format!("{i},val_{i},{},{},{i},{}\n", i * 2, i * 3, i % 100).as_bytes(),
-            )
-            .unwrap();
+            w.write_all(format!("{i},val_{i},{},{},{i},{}\n", i * 2, i * 3, i % 100).as_bytes())
+                .unwrap();
         }
     }
     w.finish().unwrap();

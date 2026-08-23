@@ -65,6 +65,18 @@ impl RawLayout {
         self.raw_dir.join(".updater.lock")
     }
 
+    /// Durable control-plane directory: one JSON record per version tracking
+    /// *what work should happen* (see `crate::work_state`), kept separate
+    /// from the data-plane sidecars under each snapshot directory that
+    /// record what was actually published.
+    pub fn work_dir(&self) -> PathBuf {
+        self.raw_dir.join(".work")
+    }
+
+    pub fn work_state_path(&self, version: &crate::domain::VersionId) -> PathBuf {
+        self.work_dir().join(format!("{version}.json"))
+    }
+
     pub fn latest_symlink_path(&self) -> PathBuf {
         self.raw_dir.join("latest")
     }
