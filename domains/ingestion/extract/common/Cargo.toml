@@ -16,3 +16,14 @@ dotenvy.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-stdout.workspace = true
+tracing-opentelemetry.workspace = true
+
+[features]
+# In-memory span/metric exporters for tests that assert on what observability
+# actually recorded, instead of only on side effects. Kept behind a feature
+# (rather than always-on) so crates that don't test observability directly
+# don't pay for opentelemetry_sdk's `testing` feature in their normal builds.
+observability-testing = ["opentelemetry_sdk/testing"]

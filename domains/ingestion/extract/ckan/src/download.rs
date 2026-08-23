@@ -113,3 +113,45 @@ fn header_str(response: &reqwest::Response, name: reqwest::header::HeaderName) -
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// Rebuilds a [`DownloadOutcome`] by reading a `.zip` file that already
+/// exists on disk, left behind by an interrupted prior run's *completed*
+/// download (implementation plan Phase 6: recovery should re-verify an
+/// already-downloaded archive rather than re-download it from the network).
+///
+/// This performs no integrity check of its own — if the file is corrupt or
+/// truncated, this still returns a `DownloadOutcome` (with whatever size and
+/// hash the corrupt bytes happen to produce); the normal Extract-stage
+/// archive checks (`crate::archive::validate_and_extract`) reject a bad
+/// archive exactly as they would one that was freshly (badly) downloaded, so
+/// there is no separate integrity check to duplicate here.
+///
+/// `content_length_header`, `etag`, and `last_modified` are always `None`:
+/// that provenance only ever came from the original HTTP response and isn't
+/// recoverable from the file alone. The two fields the durable sidecar
+/// actually persists — `archive_size_bytes` and `archive_sha256` — are fully
+/// recomputed from the file's real, current bytes, never assumed.
+pub fn recompute_outcome_from_existing_file(path: &Path) -> Result<DownloadOutcome, DownloadError> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut total_bytes: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total_bytes += n as u64;
+    }
+
+    Ok(DownloadOutcome {
+        bytes: total_bytes,
+        sha256: hex_encode(&hasher.finalize()),
+        content_length_header: None,
+        etag: None,
+        last_modified: None,
+    })
+}

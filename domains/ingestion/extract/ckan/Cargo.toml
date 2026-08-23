@@ -25,6 +25,9 @@ arrow-csv.workspace = true
 arrow-schema.workspace = true
 arrow-array.workspace = true
 parquet.workspace = true
+opentelemetry.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+ti-common = { path = "../common", features = ["observability-testing"] }
+opentelemetry_sdk.workspace = true

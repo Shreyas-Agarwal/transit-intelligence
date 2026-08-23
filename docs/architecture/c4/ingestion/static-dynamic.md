@@ -1,96 +1,107 @@
 # C4 — Dynamic: One Check-and-Update Run
 
 Mermaid has no native C4 "Dynamic" diagram type, so this is a sequence diagram — the standard stand-in for a C4
-dynamic view. It traces a single invocation of `ckan::pipeline::run`, in the order the code actually executes,
-including the recovery steps the design doc requires to run *before* any network call (§12).
+dynamic view. It traces one invocation of `ckan::pipeline::run` in the order the code actually executes.
+
+Participants are deliberately collapsed to the ones that matter for *interaction order*: `Worker` represents
+whichever module a step actually runs in (`snapshot`, `download`, `archive`, `parquet_convert` — see
+[static-component.md](static-component.md) for the module-level wiring); `Upstream` collapses the CKAN API and the
+resource host into one lane, since both are the same real-world publisher and the distinction doesn't matter to
+*this* diagram's story. Only **one** worker's stage sequence is drawn in full — the `par` block makes clear that
+this repeats, concurrently, for every queued version, bounded by the worker pool and the two resource-specific
+permit pools, rather than trying to draw N workers side by side.
 
 ```mermaid
 sequenceDiagram
     actor Scheduler
     participant CLI as ckan (main)
     participant Pipeline
-    participant Lock
-    participant Manifest
-    participant Symlink
-    participant CkanClient
-    participant Download
-    participant Archive
-    participant ParquetConvert
+    participant Queue as Bounded Queue
+    participant Worker as Queue Worker (snapshot)
+    participant Upstream as opentransportdata.swiss
     participant Raw as Raw Snapshot Store
 
     Scheduler->>CLI: invoke
-    CLI->>Pipeline: run(layout, ckan_client, download_http)
+    CLI->>Pipeline: run(layout, ckan_client, download_http, concurrency)
 
-    Pipeline->>Lock: acquire (O_CREAT|O_EXCL)
-    alt lock file already exists
-        Lock->>Lock: read PID from existing lock
-        alt PID not running on this host
-            Lock->>Raw: remove stale lock
-            Lock->>Raw: create lock (retry)
-        else PID running / different host
-            Lock-->>Pipeline: error — another run in progress
-        end
+    rect rgba(200, 200, 200, 0.1)
+    Note over Pipeline,Raw: Startup — always runs, before any network call
+    Pipeline->>Raw: acquire updater lock (stale-PID retried once)
+    Pipeline->>Raw: sweep only unresumable *.zip.part staging files
+    Pipeline->>Raw: scan sidecars -> installed versions
+    Pipeline->>Raw: rebuild + write manifest; verify latest agrees with it
+    Pipeline->>Raw: scan durable work state (.work/*.json)
     end
 
-    Note over Pipeline,Raw: Recovery — always runs, before any network call (§12)
-    Pipeline->>Raw: wipe .staging/ unconditionally
-    Pipeline->>Manifest: scan_sidecars(raw/*/.snapshot-meta.json)
-    Manifest-->>Pipeline: installed versions
-    Pipeline->>Manifest: rebuild_manifest(installed)
-    Pipeline->>Raw: write .manifest.json
-    Pipeline->>Symlink: read_latest()
-    Symlink-->>Pipeline: current target (or none)
-    Pipeline->>Pipeline: assert manifest.latest == symlink target (fail loudly on mismatch)
+    Pipeline->>Upstream: list_gtfs_zip_resources (package_show, Bearer token, retried)
+    Upstream-->>Pipeline: [UpstreamResource]
 
-    Pipeline->>CkanClient: list_gtfs_zip_resources()
-    CkanClient->>CkanClient: GET package_show (Bearer token, retried on failure)
-    CkanClient-->>Pipeline: [UpstreamResource]
-    Pipeline->>Pipeline: filter out already-installed versions, sort oldest-first
+    Note over Pipeline: reconcile() — pure, no I/O:<br/>upstream + work state + installed -> eligible QUEUED versions
+    Pipeline->>Raw: persist reconciled work state
 
-    loop for each pending version
-        Pipeline->>Download: download_to_staging(url)
-        Download-->>Pipeline: bytes, sha256, etag, last_modified
-        Pipeline->>Pipeline: verify_upstream_hash (if CKAN hash present)
-        Pipeline->>Archive: validate_and_extract(zip, staging_dir)
-        Archive->>Archive: CRC32 check every entry
-        Archive->>Archive: check required GTFS members present & non-empty
-        Archive-->>Pipeline: ok / error
-        alt validation failed
-            Pipeline->>Raw: delete staging artifacts, record failed (in-memory, this run only)
-        else validation passed
-            Pipeline->>ParquetConvert: convert_directory(csv_staging, parquet_staging)
-            ParquetConvert->>ParquetConvert: for every *.txt: read as all-Utf8, write *.parquet (zstd)
-            ParquetConvert-->>Pipeline: ok / error
-            alt conversion failed
-                Pipeline->>Raw: delete CSV + parquet staging artifacts, record failed (in-memory, this run only)
-            else conversion succeeded
-                Pipeline->>Raw: delete CSV staging (scratch, no longer needed)
-                Pipeline->>Raw: atomic rename parquet staging → raw/<version>/
-                Pipeline->>Raw: write .snapshot-meta.json sidecar
-            end
+    Pipeline->>Queue: spawn fixed worker pool (size: max_concurrent_versions)
+
+    par enqueue eligible versions (blocks if the queue is full)
+        Pipeline->>Queue: enqueue(version)
+    and drain results as workers finish (must run concurrently — see note below)
+        Queue-->>Worker: pull next version
+        activate Worker
+
+        Worker->>Worker: Claim — QUEUED to RUNNING, persisted
+        Worker->>Raw: inspect staging for resumable progress
+
+        alt no valid archive on disk
+            Worker->>Upstream: stream zip to staging
+        else valid archive already staged
+            Worker->>Raw: re-verify from disk (no re-download)
         end
+        Worker->>Worker: Verify — hash against publisher's
+
+        alt extraction not already valid
+            Worker->>Worker: Extract + validate (Tier 1)
+        else already valid
+            Worker->>Worker: skip — reuse existing extraction
+        end
+
+        alt conversion not already complete
+            Worker->>Worker: Convert CSV to Parquet
+        else already complete
+            Worker->>Worker: skip — reuse existing conversion
+        end
+
+        Worker->>Raw: atomic rename staging -> final; write sidecar
+        Worker->>Worker: Complete — RUNNING to PUBLISHED (or FAILED on any step above)
+        Worker-->>Queue: result
+        deactivate Worker
     end
 
-    Pipeline->>Pipeline: newest = max(installed versions with status verified)
+    Note over Pipeline,Raw: Only after every result is drained
+    Pipeline->>Pipeline: newest = max(installed, status verified)
     alt newest differs from current latest
-        Pipeline->>Symlink: advance_latest(newest)
-        Symlink->>Raw: symlink + rename (atomic swap)
+        Pipeline->>Raw: advance latest (atomic symlink swap)
     end
-
-    Pipeline->>Manifest: rebuild_manifest(installed, failed_this_run)
-    Pipeline->>Raw: write .manifest.json
-    Pipeline->>Lock: release (on drop)
+    Pipeline->>Raw: rebuild + write final manifest
+    Pipeline->>Raw: release lock (on drop)
     Pipeline-->>CLI: Ok / Err
 ```
 
 ## Notes
 
-* The lock-staleness branch and the manifest-rebuild-and-verify block both run **every** invocation, not just
-  after a crash — this is what makes the design self-healing rather than needing a special "recovery mode"
-  (design doc §12: "on every run, before touching the network, clean staging, reconcile the manifest against the
-  sidecars, and verify `latest` agrees with the manifest").
-* The per-version loop is sequential in the current implementation (correctness/simplicity favored over
-  throughput, matching the "performance is not a concern" priority) — a failure on one version doesn't abort the
-  run; it's recorded and the loop continues to the next version.
-* `latest` only ever advances forward, and only after the loop finishes examining every pending version — never
-  mid-loop and never backwards (design doc §7).
+* **The `par` block is a correctness requirement, not a diagramming convenience.** Enqueuing every eligible
+  version and only then draining results can deadlock: with two independently-bounded channels (the work queue and
+  its result channel), workers can get stuck handing back results with nowhere to put them, which stops them
+  freeing queue capacity, which stops the producer finishing, which is the only thing that would let draining
+  start. Production code runs the producer and the drain loop as genuinely concurrent tasks for exactly this
+  reason.
+* **Any one stage failing ends that version at `Complete: RUNNING to FAILED`**, not shown as a separate branch per
+  stage to keep the diagram readable — Download, Verify, Extract, and Convert each have their own failure path in
+  the code (cleaning up exactly what that stage produced), but all of them converge on the same durable outcome:
+  the version is marked `FAILED`, nothing partial is ever published, and the next run's `reconcile()` will retry it.
+* **The three `alt` blocks inside the worker's sequence are stage-aware resume**, decided once per version from
+  what's actually found on disk — not from anything a previous process remembered. A version resuming after a
+  crash can skip straight to whichever step its durable staging evidence actually supports.
+* The startup block runs on **every** invocation, not just after a crash — this is what makes recovery self-healing
+  rather than needing a special "recovery mode." Unlike V1, it no longer wipes all of `.staging/` — only files that
+  are unconditionally unresumable are swept; everything else is left for each version's own stage-aware resume
+  check.
+* `latest` only ever advances after every queued version has been drained — never mid-run, and never backwards.

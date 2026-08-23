@@ -7,6 +7,7 @@ use clap::Parser;
 
 use ckan::config::CkanConfig;
 use ckan::paths::RawLayout;
+use ckan::pipeline::ConcurrencyConfig;
 
 #[derive(Parser)]
 #[command(
@@ -19,7 +20,18 @@ struct Cli {}
 async fn main() -> anyhow::Result<()> {
     let _cli = Cli::parse();
 
-    ti_common::logging::init();
+    // Held for the rest of `main`: dropping it (at the end of this function,
+    // on every return path including an early `?`) is what flushes traces
+    // and metrics to the configured exporter — see
+    // `ti_common::observability` for why a short-lived CLI needs that rather
+    // than relying on a background export timer.
+    let _observability = ti_common::observability::init(
+        ti_common::observability::ServiceInfo {
+            name: "ckan-gtfs-downloader",
+            version: env!("CARGO_PKG_VERSION"),
+        },
+        ti_common::observability::ExporterKind::from_env(),
+    );
 
     let cfg = CkanConfig::from_env()?;
     let layout = RawLayout::new(cfg.raw_dir.clone());
@@ -40,6 +52,12 @@ async fn main() -> anyhow::Result<()> {
         &ckan_client,
         &download_http,
         cfg.cutoff_version.as_ref(),
+        ConcurrencyConfig {
+            max_concurrent_versions: cfg.max_concurrent_versions,
+            max_queued_versions: cfg.max_queued_versions,
+            max_concurrent_downloads: cfg.max_concurrent_downloads,
+            max_concurrent_processing: cfg.max_concurrent_processing,
+        },
     )
     .await
     .inspect_err(|e| tracing::error!(error = %e, "updater run failed"))?;
