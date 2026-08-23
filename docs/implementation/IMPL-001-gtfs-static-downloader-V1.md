@@ -311,4 +311,90 @@ One new primitive was added to `work_state.rs` to support rule 3: `VersionWork::
 
 ---
 
-**WAITING FOR APPROVAL** to begin Phase 3 (bounded in-process work queue).
+**Phase 2 review resolved:**
+
+1. Approved: keep divergence surfacing behavior, no auto-requeue.
+2. Approved: `reconcile_as_published` stays exactly as implemented; no blanket `(Any → Published)` transition added to the FSM.
+3. Approved: the queue carries `VersionId` only. **Refinement directed for Phase 3:** do not have the queue consumer re-query CKAN for `UpstreamResource` metadata. The scheduler already performed discovery — that discovery result (the `Vec<UpstreamResource>` from the same pass) must be kept alive in the execution context and looked up by `VersionId` when a worker needs resource metadata, never re-fetched.
+
+Approved. Proceeded to Phase 3.
+
+---
+
+## Phase 3 — Bounded in-process work queue
+
+### Implemented
+
+A new `ckan::queue` module: a generic bounded producer/consumer primitive replacing the "acquire a semaphore permit, then spawn a task" pattern `pipeline::run` uses today. As with Phases 1–2, this is additive and not yet wired into `pipeline.rs` — proving the queue mechanism correct in isolation, with a stub worker, is this phase's job; plugging the real `process_version` stages into it is Phase 4's.
+
+```text
+producer (reconciler's eligible work)
+    |
+    v
+bounded channel     capacity = MAX_QUEUED_VERSIONS   (config.max_queued)
+    |
+    v
+fixed worker pool   size     = MAX_ACTIVE_VERSIONS    (config.max_active)
+```
+
+`queue::spawn(config, process)` spawns exactly `max_active` long-lived worker tasks up front — never one task per item — sharing one `tokio::sync::mpsc` channel of capacity `max_queued` via an `Arc<Mutex<Receiver>>` (the mutex is held only long enough to pull one item off; processing happens outside it, so many workers process concurrently while at most one is ever mid-`recv`). It returns a `WorkQueue<T>` producer handle, a `Receiver<(T, R)>` of completed results, and the `JoinSet` of worker tasks.
+
+Two independently-bounded knobs, exactly as the plan specifies:
+
+- **`max_queued`** — the channel capacity. Once that many items are buffered waiting for a worker, `WorkQueue::enqueue` blocks. This is the required behavior verbatim: *"If the queue is full: producer blocks/backpressures rather than spawn more tasks."* There is no code path in `queue::spawn` that spawns an additional task in response to load — the worker count is fixed at spawn time.
+- **`max_active`** — the fixed worker-pool size. Since each worker processes exactly one item at a time before looping back to `recv`, this directly bounds concurrent processing without a second semaphore.
+
+Graceful shutdown is drain-based, not cancellation-based: `WorkQueue::close()` (or simply dropping the handle) closes the producer side; workers keep processing whatever is already buffered or in-flight and only exit once `recv` reports the channel is both closed and empty. Nothing is aborted mid-item.
+
+Following the Phase 2 refinement, the module is generic over the item and result types (`spawn<T, F, Fut, R>`) rather than hardcoded to a GTFS type — but the module doc comment states plainly that the production item type will be `VersionId` alone, and that a worker needing `UpstreamResource` metadata must look it up from the discovery result already captured in its own closure, never re-query CKAN.
+
+**Documented boundary, found while writing the tests:** this queue is content-blind — it has no identity-level deduplication. Two *separate* `enqueue` calls carrying the same logical `VersionId` are free to run concurrently as far as this module is concerned; single-delivery only guarantees a given *message* goes to one worker, not that a given *identity* is exclusive. Avoiding the latter in production is a producer-discipline property (Phase 2's `reconcile` only ever offers each distinct eligible version once per pass, and a new pass doesn't start until the previous one's queue has drained) and, later, the Phase 4 Claim step's job. Called out explicitly in both the module doc comment and the relevant test, rather than left implicit.
+
+### Files Changed
+
+- `domains/ingestion/extract/ckan/src/queue.rs` (new) — `QueueConfig`, `WorkQueue<T>`, `spawn()`.
+- `domains/ingestion/extract/ckan/tests/queue.rs` (new) — 6 integration tests.
+- `domains/ingestion/extract/ckan/src/lib.rs` — registered `pub mod queue;`.
+
+`pipeline.rs`, `reconcile.rs`, `work_state.rs`, and everything else from Phases 0–2 are unchanged.
+
+### Tests Added / Updated
+
+6 new tests, covering every bullet in the plan's Phase 3 test list:
+
+| Test | Proves |
+|---|---|
+| `enqueue_blocks_once_queue_and_workers_are_saturated` | queue capacity — exactly `max_active + max_queued` items are accepted without any completing; the next `enqueue` provably blocks (via a `Notify` gate + a short timeout expected to fail) |
+| `blocked_producer_unblocks_and_the_item_is_still_processed` | producer backpressure is temporary, not a deadlock — once a worker frees a slot, the pending `enqueue` completes and that item is still genuinely processed |
+| `worker_pool_processes_concurrently_without_exceeding_max_active` | worker consumption — an atomic peak-concurrency counter proves the pool actually reaches `max_active` concurrent processing and never exceeds it |
+| `closing_the_queue_drains_remaining_work_before_workers_exit` | queue drain + graceful shutdown — closing the producer mid-flight still delivers every already-queued/in-flight item, and every worker exits only after the drain completes |
+| `no_item_is_lost_across_many_more_items_than_queue_capacity` | no lost work — 50 items through a queue of combined capacity 7 (`max_queued=3, max_active=4`); every item delivered exactly once |
+| `no_two_workers_ever_process_the_same_enqueued_item_concurrently` | no duplicate active work (as scoped to this module — see "Documented boundary" above) — a shared in-flight `HashSet` with an assert-on-double-insert proves no single enqueued message is ever delivered to two workers at once |
+
+### Validation
+
+- `cargo fmt --check`: clean.
+- `cargo check --workspace --all-targets`: clean, no warnings.
+- `cargo clippy --workspace --all-targets`: same 2 pre-existing style warnings as Phases 0–2, nothing new.
+- `cargo test -p ckan`: **71 passed, 0 failed, 3 ignored** (unchanged benchmarks). Up from 65 in Phase 2 — 6 new tests, zero regressions.
+
+### Architectural Notes
+
+- **A real deadlock was found and fixed during test-writing, not in the queue itself but in two tests' usage pattern.** `no_item_is_lost_across_many_more_items_than_queue_capacity` and `no_two_workers_ever_process_the_same_enqueued_item_concurrently` originally enqueued everything sequentially and only started draining the output channel afterward. With an output channel that's also bounded, and enough items to exceed both channels' capacity, this created a genuine circular wait: workers blocked trying to send completed results into a full, undrained output channel, which meant they couldn't loop back to drain the input channel, which meant the producer's remaining `enqueue` calls never got the room they were waiting for — and the output channel was never going to be drained because the producer's loop, which precedes the drain call in program order, never finished. Confirmed live: `cargo test` hung past 120 seconds, and process inspection showed the `queue` test binary specifically stuck. Fixed by running the producer loop and the output drain concurrently (`tokio::spawn` for the producer, drain in the foreground) in all three multi-item tests, including the one that happened to pass anyway (`closing_the_queue_drains_remaining_work_before_workers_exit`, hardened as a matter of not relying on a timing coincidence). This is flagged prominently because it's a real, reusable lesson for Phase 4: **the eventual `pipeline::run` caller of this queue must drain results concurrently with enqueuing, never enqueue-then-drain sequentially**, or the exact same deadlock reproduces in production. Today's `pipeline::run` already drains concurrently via `JoinSet::join_next` inside the same loop that spawns, so this is a known-safe pattern to carry forward, not a new problem to solve.
+- **`max_active` bounds concurrency via worker-pool size, not a second semaphore.** This was a deliberate simplification: rather than layering a `Semaphore` bound on top of unboundedly-spawned tasks (today's `pipeline.rs` approach), the fixed-size pool structurally cannot exceed `max_active` concurrent items — there is no permit to forget to acquire or release. This also sets up Phase 5's resource-specific concurrency cleanly: today one worker does the whole download+extract+convert sequence per item, so pool size alone bounds everything; Phase 5 will need to introduce separate permits *inside* a worker's processing of one item (network vs. CPU/disk), which composes fine with this design without changing the queue itself.
+- **The output channel's capacity (`max(max_queued, max_active)`) is an implementation default, not a plan requirement.** It was sized so that, under normal *concurrent* draining (the pattern this queue is meant to be used with), it's unlikely to ever backpressure workers. It is still a bounded channel, consistent with "queue capacity is bounded" as a general invariant, and callers are expected to drain it continuously rather than in a batch at the end (see the deadlock finding above).
+
+### Deviations / Risks
+
+- None from the plan's Phase 3 scope. The deadlock above was caught and fixed within this phase, before merge — not a shipped regression, but documented here in full because it's exactly the kind of subtle backpressure interaction the plan's non-negotiable invariants (bounded queue, bounded resource concurrency) are meant to guard against, and it's worth Phase 4 inheriting the lesson explicitly rather than rediscovering it.
+- Carried-forward note for Phase 4: the worker closure passed to `queue::spawn` will need to be constructed with the discovery result (`Vec<UpstreamResource>` or a `HashMap<VersionId, UpstreamResource>` built from it) captured in its closure per the Phase 2 refinement — `pipeline::run` will need to keep that map alive for the queue's lifetime, not just for the initial reconciliation call.
+
+### Review Questions
+
+1. The output-channel-capacity deadlock and its fix (concurrent producer/drain) — confirm this matches your expectation for how Phase 4's `pipeline::run` integration should drain results, or would you prefer a different consumption pattern (e.g., an unbounded output channel, given results are small metadata rather than archive bytes)?
+2. `max_active` is enforced purely by fixed worker-pool size (no semaphore). Confirm this is the preferred mechanism to carry into Phase 5, versus reintroducing a semaphore *inside* each worker for the finer-grained network/CPU split.
+3. Any concern with the queue module remaining fully generic (`spawn<T, F, Fut, R>`) rather than being specialized to `VersionId` directly, given it's currently only exercised with stub workers and won't be used for anything but `VersionId` in practice?
+
+---
+
+**WAITING FOR APPROVAL** to begin Phase 4 (explicit snapshot processing pipeline).
